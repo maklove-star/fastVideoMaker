@@ -1,0 +1,10 @@
+{
+  "status": "placeholder",
+  "message": "真实视频生成未开启。配置 ENABLE_REAL_VIDEO=true、ARK_VIDEO_MODEL、ARK_VIDEO_API_KEY/ARK_API_KEY 后将调用 Ark 视频生成任务接口。",
+  "portrait_asset_id": "virtual_asset_test",
+  "audio_path": "D:\\AI量化\\fastVideo\\output\\audio\\test.mp3",
+  "audio_source_url": "https://example.com/test.mp3",
+  "script": "??????????",
+  "resolution": "720p",
+  "estimated_duration_seconds": 15
+}

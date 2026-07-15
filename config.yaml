@@ -1,0 +1,34 @@
+script:
+  provider: volc_ark
+  model: glm-5-2-260617
+  temperature: 0.8
+  max_tokens: 500
+
+audio:
+  provider: volcengine_tts
+  # Console: https://console.volcengine.com/speech/service/10007
+  http_url: https://openspeech.bytedance.com/api/v1/tts
+  v3_url: https://openspeech.bytedance.com/api/v3/tts/unidirectional
+  cluster: volcano_tts
+  resource_id: volc.service_type.10029
+  default_speaker: zh_female_shuangkuaisisi_moon_bigtts
+  format: mp3
+  sample_rate: 24000
+  speed_ratio: 1.0
+  volume_ratio: 1.0
+  pitch_ratio: 1.0
+
+video:
+  provider: heygen
+  # https://developers.heygen.com/image-to-video
+  # Uses audio_url / audio_asset_id for lipsync (no script TTS).
+  resolution: 720p
+  aspect_ratio: auto
+  require_official_virtual_portrait_asset: false
+
+publisher:
+  enabled: false
+  platforms:
+    - douyin
+    - xiaohongshu
+    - kuaishou
