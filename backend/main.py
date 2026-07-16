@@ -17,6 +17,11 @@ from .schemas import (
     AudioGenerateResponse,
     AudioHistoryResponse,
     AudioPreviewRequest,
+    CopywritingCreateRequest,
+    CopywritingItem,
+    CopywritingListResponse,
+    CopywritingUpdateRequest,
+    PortraitHistoryResponse,
     PortraitUploadResponse,
     ScriptProcessRequest,
     ScriptProcessResponse,
@@ -28,9 +33,18 @@ from .schemas import (
     WorkflowPayload,
     WorkflowResult,
 )
+from .copywriting_store import (
+    create_copywriting,
+    delete_copywriting,
+    get_copywriting,
+    init_db as init_copywriting_db,
+    list_copywriting,
+    update_copywriting,
+)
 from .script_processor import process_script
 from .utils.file_utils import ensure_parent, output_url
 from .utils.logger import get_logger
+from .portrait_history import list_portrait_history, save_portrait_history_meta
 from .video_generator import generate_digital_human, query_heygen_video_status, start_heygen_video
 from .video_history import list_video_history, save_video_history_meta
 
@@ -38,6 +52,7 @@ logger = get_logger(__name__)
 settings = get_settings()
 settings.output_dir.mkdir(parents=True, exist_ok=True)
 (settings.output_dir / "portraits").mkdir(parents=True, exist_ok=True)
+init_copywriting_db()
 
 ALLOWED_PORTRAIT_TYPES = {
     "image/jpeg": ".jpg",
@@ -126,15 +141,27 @@ async def upload_portrait(file: UploadFile = File(...)) -> PortraitUploadRespons
         if not portrait_url:
             raise RuntimeError("无法生成人像预览地址。")
 
+        original_name = file.filename or output_path.name
+        save_portrait_history_meta(
+            portrait_path=output_path,
+            portrait_url=portrait_url,
+            file_name=original_name,
+            portrait_id=portrait_id,
+        )
         logger.info("Portrait uploaded path=%s bytes=%s", output_path, len(raw))
         return PortraitUploadResponse(
             portraitPath=str(Path(output_path).resolve()),
             portraitUrl=portrait_url,
-            fileName=file.filename or output_path.name,
+            fileName=original_name,
         )
     except Exception as error:  # noqa: BLE001
         logger.exception("Portrait upload failed")
         raise _http_error(error) from error
+
+
+@app.get("/api/portraits/history", response_model=PortraitHistoryResponse)
+def portrait_history(limit: int = 50) -> PortraitHistoryResponse:
+    return PortraitHistoryResponse(items=list_portrait_history(limit=limit))
 
 
 @app.get("/api/audio/voices", response_model=dict[str, list[VoiceOption]])
@@ -186,6 +213,65 @@ def process_script_endpoint(payload: ScriptProcessRequest) -> ScriptProcessRespo
     except Exception as error:  # noqa: BLE001
         logger.exception("Script processing failed")
         raise _http_error(error) from error
+
+
+@app.get("/api/copywriting", response_model=CopywritingListResponse)
+def copywriting_list(q: str = "", limit: int = 50, offset: int = 0) -> CopywritingListResponse:
+    items, total = list_copywriting(q=q, limit=limit, offset=offset)
+    return CopywritingListResponse(
+        items=[CopywritingItem(**item) for item in items],
+        total=total,
+    )
+
+
+@app.get("/api/copywriting/{item_id}", response_model=CopywritingItem)
+def copywriting_get(item_id: str) -> CopywritingItem:
+    item = get_copywriting(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="文案不存在。")
+    return CopywritingItem(**item)
+
+
+@app.post("/api/copywriting", response_model=CopywritingItem)
+def copywriting_create(payload: CopywritingCreateRequest) -> CopywritingItem:
+    try:
+        item = create_copywriting(
+            title=payload.title,
+            content=payload.content,
+            tags=payload.tags,
+            input_mode=payload.inputMode,
+            notes=payload.notes,
+        )
+        return CopywritingItem(**item)
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Copywriting create failed")
+        raise _http_error(error) from error
+
+
+@app.put("/api/copywriting/{item_id}", response_model=CopywritingItem)
+def copywriting_update(item_id: str, payload: CopywritingUpdateRequest) -> CopywritingItem:
+    try:
+        item = update_copywriting(
+            item_id,
+            title=payload.title,
+            content=payload.content,
+            tags=payload.tags,
+            input_mode=payload.inputMode,
+            notes=payload.notes,
+        )
+        return CopywritingItem(**item)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Copywriting update failed id=%s", item_id)
+        raise _http_error(error) from error
+
+
+@app.delete("/api/copywriting/{item_id}")
+def copywriting_delete(item_id: str) -> dict[str, bool]:
+    if not delete_copywriting(item_id):
+        raise HTTPException(status_code=404, detail="文案不存在。")
+    return {"ok": True}
 
 
 @app.post("/api/audio/generate", response_model=AudioGenerateResponse)

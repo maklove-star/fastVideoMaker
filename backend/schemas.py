@@ -20,6 +20,19 @@ class PortraitUploadResponse(BaseModel):
     fileName: str
 
 
+class PortraitHistoryItem(BaseModel):
+    id: str
+    fileName: str
+    portraitPath: str
+    portraitUrl: str
+    createdAt: str
+    sizeBytes: int
+
+
+class PortraitHistoryResponse(BaseModel):
+    items: List[PortraitHistoryItem] = Field(default_factory=list)
+
+
 class WorkflowPayload(BaseModel):
     inputMode: InputMode = "generate"
     userInput: str = Field(..., min_length=1)
@@ -177,3 +190,36 @@ class WorkflowResult(BaseModel):
     videoTaskId: Optional[str] = None
     sourceVideoUrl: Optional[str] = None
     publishResults: List[PublishResult] = Field(default_factory=list)
+
+
+class CopywritingItem(BaseModel):
+    id: str
+    title: str
+    content: str
+    tags: str = ""
+    inputMode: InputMode = "direct"
+    notes: str = ""
+    wordCount: int = 0
+    createdAt: str
+    updatedAt: str
+
+
+class CopywritingListResponse(BaseModel):
+    items: List[CopywritingItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class CopywritingCreateRequest(BaseModel):
+    title: str = ""
+    content: str = Field(..., min_length=1)
+    tags: str = ""
+    inputMode: InputMode = "direct"
+    notes: str = ""
+
+
+class CopywritingUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = Field(default=None, min_length=1)
+    tags: Optional[str] = None
+    inputMode: Optional[InputMode] = None
+    notes: Optional[str] = None

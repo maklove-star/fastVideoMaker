@@ -97,6 +97,15 @@ export interface PortraitUploadResult {
   fileName: string;
 }
 
+export interface PortraitHistoryItem {
+  id: string;
+  fileName: string;
+  portraitPath: string;
+  portraitUrl: string;
+  createdAt: string;
+  sizeBytes: number;
+}
+
 export interface VideoGeneratePayload {
   portraitAssetId: string;
   audioPath: string;
@@ -158,4 +167,29 @@ export interface WorkflowResult {
   videoTaskId?: string;
   sourceVideoUrl?: string;
   publishResults?: PublishResult[];
+}
+
+export interface CopywritingItem {
+  id: string;
+  title: string;
+  content: string;
+  tags: string;
+  inputMode: InputMode;
+  notes: string;
+  wordCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CopywritingPayload {
+  title?: string;
+  content: string;
+  tags?: string;
+  inputMode?: InputMode;
+  notes?: string;
+}
+
+export interface CopywritingListResult {
+  items: CopywritingItem[];
+  total: number;
 }

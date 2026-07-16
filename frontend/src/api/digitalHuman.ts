@@ -2,6 +2,10 @@ import type {
   AudioGeneratePayload,
   AudioGenerateResult,
   AudioHistoryItem,
+  CopywritingItem,
+  CopywritingListResult,
+  CopywritingPayload,
+  PortraitHistoryItem,
   PortraitUploadResult,
   ScriptProcessPayload,
   ScriptProcessResult,
@@ -66,6 +70,11 @@ export async function listAudioHistory(limit = 50): Promise<AudioHistoryItem[]> 
 
 export async function listVideoHistory(limit = 50): Promise<VideoHistoryItem[]> {
   const data = await requestJson<{ items: VideoHistoryItem[] }>('/api/video/history?limit=' + limit);
+  return data.items || [];
+}
+
+export async function listPortraitHistory(limit = 50): Promise<PortraitHistoryItem[]> {
+  const data = await requestJson<{ items: PortraitHistoryItem[] }>('/api/portraits/history?limit=' + limit);
   return data.items || [];
 }
 
@@ -162,4 +171,49 @@ export async function uploadPortrait(file: File): Promise<PortraitUploadResult> 
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+export async function listCopywriting(params: { q?: string; limit?: number; offset?: number } = {}): Promise<CopywritingListResult> {
+  const query = new URLSearchParams();
+  if (params.q) query.set('q', params.q);
+  if (params.limit != null) query.set('limit', String(params.limit));
+  if (params.offset != null) query.set('offset', String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return requestJson<CopywritingListResult>(`/api/copywriting${suffix}`);
+}
+
+export async function getCopywriting(id: string): Promise<CopywritingItem> {
+  return requestJson<CopywritingItem>(`/api/copywriting/${encodeURIComponent(id)}`);
+}
+
+export async function createCopywriting(payload: CopywritingPayload): Promise<CopywritingItem> {
+  return requestJson<CopywritingItem>('/api/copywriting', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: payload.title || '',
+      content: payload.content,
+      tags: payload.tags || '',
+      inputMode: payload.inputMode || 'direct',
+      notes: payload.notes || '',
+    }),
+  });
+}
+
+export async function updateCopywriting(id: string, payload: Partial<CopywritingPayload>): Promise<CopywritingItem> {
+  return requestJson<CopywritingItem>(`/api/copywriting/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      title: payload.title,
+      content: payload.content,
+      tags: payload.tags,
+      inputMode: payload.inputMode,
+      notes: payload.notes,
+    }),
+  });
+}
+
+export async function deleteCopywriting(id: string): Promise<void> {
+  await requestJson<{ ok: boolean }>(`/api/copywriting/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }

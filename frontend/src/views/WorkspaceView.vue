@@ -1,0 +1,1285 @@
+﻿<script setup lang="ts">
+import { computed, onMounted, reactive, ref, watch } from 'vue';
+import type { Component } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  FileText,
+  Hash,
+  ImagePlus,
+  Link2,
+  Loader2,
+  Library,
+  Mic2,
+  RefreshCcw,
+  History,
+  Save,
+  Sparkles,
+  UploadCloud,
+  Video,
+  Volume2,
+  Wand2,
+  XCircle,
+} from '@lucide/vue';
+import {
+  createCopywriting,
+  generateAudio,
+  generateVideo,
+  getCopywriting,
+  listAudioHistory,
+  listPortraitHistory,
+  listVideoHistory,
+  listVoices,
+  previewAudio,
+  processScript,
+  queryVideoStatus,
+  uploadPortrait,
+} from '../api/digitalHuman';
+import type {
+  AudioGenerateResult,
+  AudioHistoryItem,
+  InputMode,
+  PortraitHistoryItem,
+  StepState,
+  VideoGenerateResult,
+  VideoHistoryItem,
+  VoiceOption,
+  WorkflowPayload,
+  WorkflowResult,
+  WorkflowStepKey,
+} from '../types';
+
+interface ModeOption {
+  value: InputMode;
+  label: string;
+  icon: Component;
+}
+
+interface StepItem {
+  key: WorkflowStepKey;
+  label: string;
+  state: StepState;
+}
+
+const defaultVoices: VoiceOption[] = [
+  { id: 'zh_female_shuangkuaisisi_uranus_bigtts', name: '爽快思思 2.0', style: '通用场景', resourceId: 'seed-tts-2.0' },
+  { id: 'zh_female_vv_uranus_bigtts', name: 'Vivi 2.0', style: '通用场景', resourceId: 'seed-tts-2.0' },
+  { id: 'zh_male_m191_uranus_bigtts', name: '云舟 2.0', style: '通用场景', resourceId: 'seed-tts-2.0' },
+];
+
+const modeOptions: ModeOption[] = [
+  { value: 'generate', label: 'AI 生成', icon: Sparkles },
+  { value: 'polish', label: '润色文案', icon: Wand2 },
+  { value: 'direct', label: '直接使用', icon: FileText },
+];
+
+const form = reactive<WorkflowPayload>({
+  inputMode: 'generate',
+  userInput: '',
+  extractUrl: false,
+  title: '',
+  description: '',
+  portraitAssetId: '',
+  voiceId: defaultVoices[0].id,
+  speedRatio: 1,
+  volumeRatio: 1,
+  pitchRatio: 1,
+  resolution: '720p',
+  aspectRatio: 'auto',
+  fit: '',
+  removeBackground: false,
+  outputFormat: 'mp4',
+  expressiveness: 'low',
+  motionPrompt: '',
+  backgroundType: 'none',
+  backgroundColor: '#FFFFFF',
+  burnCaptions: false,
+  volcCvMode: 'normal',
+  publishNow: false,
+  platforms: [],
+});
+
+const steps = reactive<StepItem[]>([
+  { key: 'script', label: '文案处理', state: 'idle' },
+  { key: 'audio', label: '音频生成', state: 'idle' },
+  { key: 'video', label: '数字人视频', state: 'idle' },
+]);
+
+const voiceOptions = ref<VoiceOption[]>(defaultVoices);
+const voiceKeyword = ref('');
+const result = ref<WorkflowResult | null>(null);
+const audioResult = ref<AudioGenerateResult | null>(null);
+const audioHistory = ref<AudioHistoryItem[]>([]);
+const selectedAudioHistoryId = ref('');
+const audioHistoryLoading = ref(false);
+const videoHistory = ref<VideoHistoryItem[]>([]);
+const selectedVideoHistoryId = ref('');
+const videoHistoryLoading = ref(false);
+const videoResult = ref<VideoGenerateResult | null>(null);
+const voicePreviewUrl = ref('');
+const voicePreviewHint = ref('');
+const scriptErrorMessage = ref('');
+const audioErrorMessage = ref('');
+const videoErrorMessage = ref('');
+const videoProgressPercent = ref(0);
+const videoProgressMessage = ref('');
+const videoTaskId = ref('');
+const voicePreviewError = ref('');
+const scriptProcessing = ref(false);
+const audioGenerating = ref(false);
+const voicePreviewing = ref(false);
+const videoGenerating = ref(false);
+const portraitUploading = ref(false);
+const portraitPreviewUrl = ref('');
+const portraitFileName = ref('');
+const portraitErrorMessage = ref('');
+const portraitInput = ref<HTMLInputElement | null>(null);
+const portraitHistory = ref<PortraitHistoryItem[]>([]);
+const selectedPortraitHistoryId = ref('');
+const portraitHistoryLoading = ref(false);
+const loadingVoices = ref(false);
+const audioUnlocked = ref(false);
+const previewPlayer = ref<HTMLAudioElement | null>(null);
+const savingCopywriting = ref(false);
+const copywritingHint = ref('');
+const route = useRoute();
+const router = useRouter();
+
+const inputLabel = computed(() => {
+  if (form.inputMode === 'generate') return '主题或关键词';
+  if (form.inputMode === 'polish') return '待润色文案或链接';
+  return '口播文案';
+});
+
+const inputPlaceholder = computed(() => {
+  if (form.inputMode === 'generate') return '例如：AI 工具如何提升短视频团队的选题效率';
+  if (form.inputMode === 'polish') return '粘贴已有文案，或粘贴抖音分享口令 / 链接用于提取';
+  return '粘贴口播文案；抖音分享口令可点「提取链接文案」自动听视频转写口播全文';
+});
+
+const canSaveCopywriting = computed(() => {
+  return Boolean(form.userInput.trim() && !savingCopywriting.value);
+});
+
+const canUseAudioConfig = computed(() => {
+  return Boolean(form.voiceId);
+});
+
+const canGenerateAudio = computed(() => {
+  return Boolean(form.userInput.trim() && canUseAudioConfig.value);
+});
+
+const filteredVoices = computed(() => {
+  const keyword = voiceKeyword.value.trim().toLowerCase();
+  const selected = voiceOptions.value.find((voice) => voice.id === form.voiceId);
+  if (!keyword) return voiceOptions.value;
+  const matched = voiceOptions.value.filter((voice) => {
+    const haystack = `${voice.name} ${voice.style || ''} ${voice.id} ${voice.resourceId || ''}`.toLowerCase();
+    return haystack.includes(keyword);
+  });
+  if (selected && !matched.some((voice) => voice.id === selected.id)) {
+    return [selected, ...matched];
+  }
+  return matched;
+});
+
+const selectedVoiceLabel = computed(() => {
+  const voice = voiceOptions.value.find((item) => item.id === form.voiceId);
+  if (!voice) return form.voiceId;
+  return `${voice.name}${voice.style ? ` · ${voice.style}` : ''}`;
+});
+
+const canExtractLinkScript = computed(() => {
+  return Boolean(form.userInput.trim() && !scriptProcessing.value);
+});
+
+const latestAudioPath = computed(() => {
+  return result.value?.audioPath || audioResult.value?.audioPath || '';
+});
+
+const latestAudioRemoteUrl = computed(() => {
+  const candidates = [
+    result.value?.sourceAudioUrl,
+    audioResult.value?.sourceAudioUrl,
+    result.value?.audioUrl,
+    audioResult.value?.audioUrl,
+  ];
+  for (const url of candidates) {
+    if (!url) continue;
+    // Only pass true remote URLs to the video API; /output/... is local.
+    if (url.startsWith('https://') || url.startsWith('http://')) {
+      if (url.includes('127.0.0.1') || url.includes('localhost')) continue;
+      return url;
+    }
+  }
+  return '';
+});
+
+const scriptForVideo = computed(() => {
+  return result.value?.script || form.userInput.trim();
+});
+
+const canGenerateVideo = computed(() => {
+  return Boolean(form.portraitAssetId.trim() && latestAudioPath.value && scriptForVideo.value.trim());
+});
+
+const audioPreviewUrl = computed(() => {
+  return result.value?.audioUrl || audioResult.value?.audioUrl || '';
+});
+
+const audioDownloadName = computed(() => {
+  const path = latestAudioPath.value || audioPreviewUrl.value;
+  const parts = path.split(/[/\\]/);
+  const name = parts[parts.length - 1] || 'voiceover.mp3';
+  return name.endsWith('.mp3') ? name : `${name}.mp3`;
+});
+
+const videoPreviewUrl = computed(() => {
+  return result.value?.videoUrl || videoResult.value?.videoUrl || result.value?.sourceVideoUrl || videoResult.value?.sourceVideoUrl || '';
+});
+
+const showVideoPlayer = computed(() => {
+  const url = videoPreviewUrl.value.toLowerCase();
+  return Boolean(url && (url.includes('.mp4') || url.includes('.mov') || url.includes('.webm')));
+});
+
+function resetSteps() {
+  steps.forEach((step) => {
+    step.state = 'idle';
+  });
+}
+
+function setStepState(key: WorkflowStepKey, state: StepState) {
+  const step = steps.find((item) => item.key === key);
+  if (step) step.state = state;
+}
+
+async function refreshVoices() {
+  loadingVoices.value = true;
+  try {
+    const voices = await listVoices();
+    voiceOptions.value = voices.length ? voices : defaultVoices;
+    if (!voiceOptions.value.some((voice) => voice.id === form.voiceId)) {
+      form.voiceId = voiceOptions.value[0]?.id || '';
+    }
+  } catch {
+    voiceOptions.value = defaultVoices;
+  } finally {
+    loadingVoices.value = false;
+  }
+}
+
+function formatAudioTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatAudioSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function voiceLabel(voiceId?: string): string {
+  if (!voiceId) return '';
+  const voice = voiceOptions.value.find((item) => item.id === voiceId);
+  return voice ? voice.name : voiceId;
+}
+
+async function refreshAudioHistory() {
+  audioHistoryLoading.value = true;
+  try {
+    audioHistory.value = await listAudioHistory(50);
+    if (
+      selectedAudioHistoryId.value &&
+      !audioHistory.value.some((item) => item.id === selectedAudioHistoryId.value)
+    ) {
+      selectedAudioHistoryId.value = '';
+    }
+  } catch {
+    // keep previous list if API temporarily offline
+  } finally {
+    audioHistoryLoading.value = false;
+  }
+}
+
+function selectAudioHistory(item: AudioHistoryItem) {
+  selectedAudioHistoryId.value = item.id;
+  audioResult.value = {
+    audioPath: item.audioPath,
+    audioUrl: item.audioUrl,
+    requestId: item.id,
+    sourceAudioUrl: item.sourceAudioUrl,
+  };
+  result.value = {
+    ...(result.value || {}),
+    audioPath: item.audioPath,
+    audioUrl: item.audioUrl,
+    sourceAudioUrl: item.sourceAudioUrl,
+  };
+  audioErrorMessage.value = '';
+  setStepState('audio', 'done');
+}
+
+async function refreshVideoHistory() {
+  videoHistoryLoading.value = true;
+  try {
+    videoHistory.value = await listVideoHistory(50);
+    if (
+      selectedVideoHistoryId.value &&
+      !videoHistory.value.some((item) => item.id === selectedVideoHistoryId.value)
+    ) {
+      selectedVideoHistoryId.value = '';
+    }
+  } catch {
+    // keep previous list if API temporarily offline
+  } finally {
+    videoHistoryLoading.value = false;
+  }
+}
+
+function selectVideoHistory(item: VideoHistoryItem) {
+  selectedVideoHistoryId.value = item.id;
+  videoResult.value = {
+    videoUrl: item.videoUrl,
+    localVideoPath: item.localVideoPath,
+    taskId: item.taskId || item.id,
+    sourceVideoUrl: item.sourceVideoUrl,
+    status: 'completed',
+    message: '历史视频',
+    progressPercent: 100,
+  };
+  result.value = {
+    ...(result.value || {}),
+    videoUrl: item.videoUrl,
+    localVideoPath: item.localVideoPath,
+    videoTaskId: item.taskId || item.id,
+    sourceVideoUrl: item.sourceVideoUrl,
+  };
+  videoTaskId.value = item.taskId || item.id;
+  videoProgressPercent.value = 100;
+  videoProgressMessage.value = '历史视频';
+  videoErrorMessage.value = '';
+  setStepState('video', 'done');
+}
+
+async function refreshPortraitHistory() {
+  portraitHistoryLoading.value = true;
+  try {
+    portraitHistory.value = await listPortraitHistory(50);
+    if (
+      selectedPortraitHistoryId.value &&
+      !portraitHistory.value.some((item) => item.id === selectedPortraitHistoryId.value)
+    ) {
+      selectedPortraitHistoryId.value = '';
+    }
+  } catch {
+    // keep previous list if API temporarily offline
+  } finally {
+    portraitHistoryLoading.value = false;
+  }
+}
+
+function selectPortraitHistory(item: PortraitHistoryItem) {
+  selectedPortraitHistoryId.value = item.id;
+  form.portraitAssetId = item.portraitPath;
+  portraitPreviewUrl.value = item.portraitUrl;
+  portraitFileName.value = item.fileName;
+  portraitErrorMessage.value = '';
+}
+
+async function unlockPreviewPlayer() {
+  const player = previewPlayer.value;
+  if (!player || audioUnlocked.value) return;
+  // Tiny silent mp3 to keep this element unlocked across awaited TTS requests.
+  const silent =
+    'data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA//////////////////////////////////////////////////////////////////8AAAA8TEFNRTMuMTAwAc0AAAAAAAAAABSAJAJAQgAAgAAAAnGpv5G5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  player.src = silent;
+  try {
+    await player.play();
+    player.pause();
+    player.currentTime = 0;
+    audioUnlocked.value = true;
+  } catch {
+    // Ignore unlock failures; we still show a manual play hint later.
+  }
+}
+
+async function runVoicePreview() {
+  if (!form.voiceId || voicePreviewing.value) return;
+
+  voicePreviewing.value = true;
+  voicePreviewError.value = '';
+  voicePreviewHint.value = '';
+
+  try {
+    await unlockPreviewPlayer();
+
+    const preview = await previewAudio({
+      text: '',
+      voiceId: form.voiceId,
+      speedRatio: form.speedRatio,
+      volumeRatio: form.volumeRatio,
+      pitchRatio: form.pitchRatio,
+    });
+    const url = preview.audioUrl || '';
+    if (!url) {
+      throw new Error('试听音频未返回地址');
+    }
+    const playableUrl = `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
+    voicePreviewUrl.value = playableUrl;
+
+    const played = await playPreview(playableUrl);
+    voicePreviewHint.value = played
+      ? `正在试听：${selectedVoiceLabel.value}`
+      : '试听音频已生成，请点击下方播放按钮收听';
+  } catch (error) {
+    voicePreviewError.value = error instanceof Error ? error.message : '音色试听失败';
+  } finally {
+    voicePreviewing.value = false;
+  }
+}
+
+async function playPreview(url: string): Promise<boolean> {
+  const player = previewPlayer.value;
+  if (!player) return false;
+
+  player.pause();
+  player.src = url;
+  player.load();
+
+  await new Promise<void>((resolve) => {
+    const onReady = () => {
+      player.removeEventListener('canplay', onReady);
+      resolve();
+    };
+    if (player.readyState >= 2) {
+      resolve();
+      return;
+    }
+    player.addEventListener('canplay', onReady, { once: true });
+    window.setTimeout(() => {
+      player.removeEventListener('canplay', onReady);
+      resolve();
+    }, 2500);
+  });
+
+  try {
+    await player.play();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runLinkScriptExtraction() {
+  if (!canExtractLinkScript.value) return;
+
+  scriptProcessing.value = true;
+  scriptErrorMessage.value = '';
+  setStepState('script', 'running');
+
+  try {
+    const processed = await processScript({
+      userInput: form.userInput.trim(),
+      mode: 'direct',
+      extractUrl: true,
+    });
+    form.userInput = processed.script;
+    form.inputMode = 'direct';
+    form.extractUrl = false;
+    result.value = {
+      ...(result.value || {}),
+      script: processed.script,
+    };
+    audioResult.value = null;
+    videoResult.value = null;
+    setStepState('script', 'done');
+  } catch (error) {
+    setStepState('script', 'error');
+    scriptErrorMessage.value = error instanceof Error ? error.message : '链接文案提取失败';
+  } finally {
+    scriptProcessing.value = false;
+  }
+}
+
+async function runAudioGeneration() {
+  if (!canGenerateAudio.value || audioGenerating.value) return;
+
+  audioGenerating.value = true;
+  audioErrorMessage.value = '';
+  setStepState('audio', 'running');
+
+  try {
+    const generatedAudio = await generateAudio({
+      text: form.userInput,
+      voiceId: form.voiceId,
+      speedRatio: form.speedRatio,
+      volumeRatio: form.volumeRatio,
+      pitchRatio: form.pitchRatio,
+    });
+    audioResult.value = generatedAudio;
+    selectedAudioHistoryId.value = generatedAudio.requestId;
+    result.value = {
+      ...(result.value || {}),
+      jobId: generatedAudio.taskId || generatedAudio.requestId,
+      audioPath: generatedAudio.audioPath,
+      audioUrl: generatedAudio.audioUrl,
+      sourceAudioUrl: generatedAudio.sourceAudioUrl,
+    };
+    setStepState('audio', 'done');
+    void refreshAudioHistory();
+  } catch (error) {
+    setStepState('audio', 'error');
+    audioErrorMessage.value = error instanceof Error ? error.message : '音频生成失败';
+  } finally {
+    audioGenerating.value = false;
+  }
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function runVideoGeneration() {
+  if (!canGenerateVideo.value || videoGenerating.value) return;
+
+  videoGenerating.value = true;
+  videoErrorMessage.value = '';
+  videoProgressPercent.value = 5;
+  videoProgressMessage.value = '上传素材并提交 HeyGen…';
+  videoTaskId.value = '';
+  setStepState('video', 'running');
+
+  try {
+    const started = await generateVideo({
+      portraitAssetId: form.portraitAssetId,
+      audioPath: latestAudioPath.value,
+      audioUrl: latestAudioRemoteUrl.value || undefined,
+      script: scriptForVideo.value,
+      title: form.title || undefined,
+      resolution: form.resolution,
+      aspectRatio: form.aspectRatio,
+      fit: form.fit,
+      removeBackground: form.removeBackground,
+      outputFormat: form.outputFormat,
+      expressiveness: form.expressiveness,
+      motionPrompt: form.motionPrompt || undefined,
+      backgroundType: form.backgroundType,
+      backgroundColor: form.backgroundColor,
+      burnCaptions: form.burnCaptions,
+      volcCvMode: form.volcCvMode,
+    });
+
+    // Non-HeyGen / sync providers may return the finished video directly.
+    if (started.videoUrl || started.localVideoPath) {
+      videoResult.value = started;
+      selectedVideoHistoryId.value = started.taskId || '';
+      result.value = {
+        ...(result.value || {}),
+        videoUrl: started.videoUrl,
+        localVideoPath: started.localVideoPath,
+        videoTaskId: started.taskId,
+        sourceVideoUrl: started.sourceVideoUrl,
+      };
+      videoProgressPercent.value = 100;
+      videoProgressMessage.value = started.message || '已完成';
+      setStepState('video', 'done');
+      void refreshVideoHistory();
+      return;
+    }
+
+    const taskId = (started.taskId || '').trim();
+    if (!taskId) {
+      throw new Error('未拿到 video_id / taskId，无法查询进度');
+    }
+    videoTaskId.value = taskId;
+    videoProgressPercent.value = started.progressPercent ?? 15;
+    videoProgressMessage.value = started.message || '已提交，开始轮询状态…';
+
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let generatedVideo: VideoGenerateResult | null = null;
+    while (Date.now() < deadline) {
+      await sleep(8000);
+      const status = await queryVideoStatus(taskId);
+      videoProgressPercent.value = status.progressPercent ?? videoProgressPercent.value;
+      videoProgressMessage.value = status.message || status.status;
+      if (status.status === 'failed') {
+        throw new Error(status.failureMessage || status.message || 'HeyGen 生成失败');
+      }
+      if (status.status === 'completed' && (status.videoUrl || status.sourceVideoUrl)) {
+        generatedVideo = {
+          videoUrl: status.videoUrl,
+          localVideoPath: status.localVideoPath,
+          taskId: status.taskId,
+          sourceVideoUrl: status.sourceVideoUrl,
+          status: status.status,
+          message: status.message,
+          progressPercent: status.progressPercent,
+          videoPageUrl: status.videoPageUrl,
+        };
+        break;
+      }
+    }
+
+    if (!generatedVideo) {
+      throw new Error('视频生成超时，请稍后在 HeyGen 控制台查看或重试');
+    }
+
+    videoResult.value = generatedVideo;
+    selectedVideoHistoryId.value = generatedVideo.taskId || taskId;
+    result.value = {
+      ...(result.value || {}),
+      videoUrl: generatedVideo.videoUrl,
+      localVideoPath: generatedVideo.localVideoPath,
+      videoTaskId: generatedVideo.taskId,
+      sourceVideoUrl: generatedVideo.sourceVideoUrl,
+    };
+    videoProgressPercent.value = 100;
+    videoProgressMessage.value = '已完成';
+    setStepState('video', 'done');
+    void refreshVideoHistory();
+  } catch (error) {
+    setStepState('video', 'error');
+    videoErrorMessage.value = error instanceof Error ? error.message : '视频生成失败';
+  } finally {
+    videoGenerating.value = false;
+  }
+}
+
+async function onPortraitSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  portraitUploading.value = true;
+  portraitErrorMessage.value = '';
+
+  try {
+    const uploaded = await uploadPortrait(file);
+    form.portraitAssetId = uploaded.portraitPath;
+    portraitPreviewUrl.value = uploaded.portraitUrl;
+    portraitFileName.value = uploaded.fileName;
+    selectedPortraitHistoryId.value = '';
+    void refreshPortraitHistory();
+  } catch (error) {
+    form.portraitAssetId = '';
+    portraitPreviewUrl.value = '';
+    portraitFileName.value = '';
+    selectedPortraitHistoryId.value = '';
+    portraitErrorMessage.value = error instanceof Error ? error.message : '人像上传失败';
+  } finally {
+    portraitUploading.value = false;
+    input.value = '';
+  }
+}
+
+function clearPortrait() {
+  form.portraitAssetId = '';
+  portraitPreviewUrl.value = '';
+  portraitFileName.value = '';
+  portraitErrorMessage.value = '';
+  selectedPortraitHistoryId.value = '';
+  if (portraitInput.value) portraitInput.value.value = '';
+}
+
+async function downloadGeneratedAudio() {
+  if (!audioPreviewUrl.value) return;
+  try {
+    const response = await fetch(audioPreviewUrl.value);
+    if (!response.ok) {
+      throw new Error(`下载失败 HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = audioDownloadName.value;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (error) {
+    audioErrorMessage.value = error instanceof Error ? error.message : '音频下载失败';
+  }
+}
+
+async function applyCopywritingFromRoute(scriptId: string) {
+  const id = scriptId.trim();
+  if (!id) return;
+  try {
+    const item = await getCopywriting(id);
+    form.userInput = item.content;
+    form.inputMode = item.inputMode || 'direct';
+    copywritingHint.value = `已载入文案：${item.title}`;
+    await router.replace({ name: 'workspace', query: {} });
+  } catch (error) {
+    scriptErrorMessage.value = error instanceof Error ? error.message : '载入文案失败';
+  }
+}
+
+async function saveCurrentCopywriting() {
+  const content = form.userInput.trim();
+  if (!content) return;
+  savingCopywriting.value = true;
+  copywritingHint.value = '';
+  scriptErrorMessage.value = '';
+  try {
+    const title =
+      window.prompt('文案标题', content.slice(0, 24).replace(/\s+/g, ' ')) || '';
+    const item = await createCopywriting({
+      title: title.trim() || content.slice(0, 24),
+      content,
+      inputMode: form.inputMode,
+    });
+    copywritingHint.value = `已保存到文案库：${item.title}`;
+  } catch (error) {
+    scriptErrorMessage.value = error instanceof Error ? error.message : '保存文案失败';
+  } finally {
+    savingCopywriting.value = false;
+  }
+}
+
+watch(
+  () => route.query.scriptId,
+  (scriptId) => {
+    if (typeof scriptId === 'string' && scriptId) {
+      void applyCopywritingFromRoute(scriptId);
+    }
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  resetSteps();
+  void refreshVoices();
+  void refreshAudioHistory();
+  void refreshVideoHistory();
+  void refreshPortraitHistory();
+});
+</script>
+
+<template>
+  <div class="app-shell">
+    <ol class="flow-progress" aria-label="生成流程">
+      <li
+        v-for="(step, index) in steps"
+        :key="step.key"
+        class="flow-step"
+        :class="step.state"
+      >
+        <div class="flow-node">
+          <span class="flow-index" aria-hidden="true">
+            <Loader2 v-if="step.state === 'running'" :size="16" class="spin" />
+            <CheckCircle2 v-else-if="step.state === 'done'" :size="16" />
+            <AlertTriangle v-else-if="step.state === 'error'" :size="16" />
+            <span v-else>{{ index + 1 }}</span>
+          </span>
+          <span class="flow-label">{{ step.label }}</span>
+        </div>
+        <span
+          v-if="index < steps.length - 1"
+          class="flow-connector"
+          :class="{
+            active: step.state === 'done' || step.state === 'running',
+            done: step.state === 'done',
+          }"
+          aria-hidden="true"
+        />
+      </li>
+    </ol>
+
+    <main class="workspace">
+      <section class="panel input-panel" aria-labelledby="input-title">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">GLM Script</span>
+            <h2 id="input-title">文案</h2>
+          </div>
+          <router-link class="summary-chip summary-chip-link" :to="{ name: 'copywriting' }">
+            <Library :size="16" />
+            <span>文案库</span>
+          </router-link>
+        </div>
+
+        <div class="segmented" role="tablist" aria-label="输入模式">
+          <button
+            v-for="mode in modeOptions"
+            :key="mode.value"
+            type="button"
+            :class="{ active: form.inputMode === mode.value }"
+            @click="form.inputMode = mode.value"
+          >
+            <component :is="mode.icon" :size="18" />
+            <span>{{ mode.label }}</span>
+          </button>
+        </div>
+
+        <label class="field wide-field">
+          <span>{{ inputLabel }}</span>
+          <textarea
+            v-model="form.userInput"
+            :placeholder="inputPlaceholder"
+            rows="9"
+            maxlength="20000"
+          />
+        </label>
+
+        <div class="inline-controls">
+          <label class="switch-line">
+            <input v-model="form.extractUrl" type="checkbox" />
+            <span class="switch" aria-hidden="true"></span>
+            <span>提取链接正文</span>
+          </label>
+          <div class="script-actions">
+            <button
+              class="small-action"
+              type="button"
+              :disabled="!canExtractLinkScript"
+              @click="runLinkScriptExtraction"
+            >
+              <Loader2 v-if="scriptProcessing" :size="17" class="spin" />
+              <Link2 v-else :size="17" />
+              <span>{{ scriptProcessing ? '听视频转写中' : '提取链接文案' }}</span>
+            </button>
+            <button
+              class="small-action"
+              type="button"
+              :disabled="!canSaveCopywriting"
+              @click="saveCurrentCopywriting"
+            >
+              <Loader2 v-if="savingCopywriting" :size="17" class="spin" />
+              <Save v-else :size="17" />
+              <span>{{ savingCopywriting ? '保存中' : '存入文案库' }}</span>
+            </button>
+            <span class="counter">{{ form.userInput.length }}/20000</span>
+          </div>
+        </div>
+
+        <p v-if="copywritingHint" class="hint-message compact-message">
+          <CheckCircle2 :size="16" />
+          <span>{{ copywritingHint }}</span>
+        </p>
+        <p v-if="scriptErrorMessage" class="error-message compact-message">
+          <AlertTriangle :size="16" />
+          <span>{{ scriptErrorMessage }}</span>
+        </p>
+      </section>
+
+      <section class="panel config-panel" aria-labelledby="config-title">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">Doubao Audio</span>
+            <h2 id="config-title">音频生成</h2>
+          </div>
+          <Mic2 :size="20" />
+        </div>
+
+        <div class="voice-toolbar">
+          <label class="field voice-search">
+            <span>搜索音色（共 {{ voiceOptions.length }}）</span>
+            <input v-model="voiceKeyword" type="search" placeholder="名称 / 场景 / voice_type" />
+          </label>
+          <button class="icon-button" type="button" title="刷新音色列表" @click="refreshVoices">
+            <Loader2 v-if="loadingVoices" :size="18" class="spin" />
+            <RefreshCcw v-else :size="18" />
+          </button>
+        </div>
+
+        <div class="voice-row">
+          <label class="field">
+            <span>音色 · {{ filteredVoices.length }} 可选</span>
+            <select v-model="form.voiceId">
+              <option v-for="voice in filteredVoices" :key="voice.id" :value="voice.id">
+                {{ voice.name }}{{ voice.style ? ` · ${voice.style}` : '' }} · {{ voice.resourceId === 'seed-tts-2.0' ? '2.0' : '1.0' }}
+              </option>
+            </select>
+          </label>
+          <button
+            class="preview-button"
+            type="button"
+            :disabled="!form.voiceId || voicePreviewing"
+            title="试听当前音色"
+            @click="runVoicePreview"
+          >
+            <Loader2 v-if="voicePreviewing" :size="18" class="spin" />
+            <Volume2 v-else :size="18" />
+            <span>{{ voicePreviewing ? '试听中' : '试听' }}</span>
+          </button>
+        </div>
+
+        <p class="voice-hint">当前：{{ selectedVoiceLabel }}</p>
+        <audio
+          ref="previewPlayer"
+          class="voice-preview-player"
+          :class="{ ready: Boolean(voicePreviewUrl) }"
+          :src="voicePreviewUrl || undefined"
+          controls
+          preload="auto"
+        />
+        <p v-if="voicePreviewHint" class="voice-hint success">{{ voicePreviewHint }}</p>
+
+        <p v-if="voicePreviewError" class="error-message compact-message">
+          <AlertTriangle :size="16" />
+          <span>{{ voicePreviewError }}</span>
+        </p>
+
+        <div class="tts-params">
+          <label class="field slider-field">
+            <span>语速 <em>{{ form.speedRatio.toFixed(1) }}x</em></span>
+            <input v-model.number="form.speedRatio" type="range" min="0.5" max="2" step="0.1" />
+          </label>
+          <label class="field slider-field">
+            <span>音量 <em>{{ form.volumeRatio.toFixed(1) }}x</em></span>
+            <input v-model.number="form.volumeRatio" type="range" min="0.5" max="2" step="0.1" />
+          </label>
+          <label class="field slider-field">
+            <span>音调 <em>{{ form.pitchRatio.toFixed(1) }}x</em></span>
+            <input v-model.number="form.pitchRatio" type="range" min="0.5" max="2" step="0.1" />
+          </label>
+        </div>
+
+        <div class="audio-actions">
+          <button class="primary-action" type="button" :disabled="!canGenerateAudio || audioGenerating" @click="runAudioGeneration">
+            <Loader2 v-if="audioGenerating" :size="19" class="spin" />
+            <Mic2 v-else :size="19" />
+            <span>{{ audioGenerating ? '音频生成中' : '生成音频' }}</span>
+          </button>
+          <button
+            class="secondary-action download-action"
+            type="button"
+            :disabled="!audioPreviewUrl"
+            @click="downloadGeneratedAudio"
+          >
+            <Download :size="19" />
+            <span>下载音频</span>
+          </button>
+        </div>
+
+        <div class="audio-history">
+          <div class="audio-history-head">
+            <div class="audio-history-title">
+              <History :size="16" />
+              <span>历史音频</span>
+            </div>
+            <button
+              class="icon-button"
+              type="button"
+              title="刷新历史"
+              :disabled="audioHistoryLoading"
+              @click="refreshAudioHistory"
+            >
+              <Loader2 v-if="audioHistoryLoading" :size="16" class="spin" />
+              <RefreshCcw v-else :size="16" />
+            </button>
+          </div>
+          <p v-if="!audioHistory.length && !audioHistoryLoading" class="voice-hint">暂无历史，生成后会出现在这里，可直接选用。</p>
+          <ul v-else class="audio-history-list">
+            <li v-for="item in audioHistory" :key="item.id">
+              <button
+                type="button"
+                class="audio-history-item"
+                :class="{ active: selectedAudioHistoryId === item.id || latestAudioPath === item.audioPath }"
+                @click="selectAudioHistory(item)"
+              >
+                <span class="audio-history-name">{{ item.fileName }}</span>
+                <span class="audio-history-meta">
+                  {{ formatAudioTime(item.createdAt) }}
+                  · {{ formatAudioSize(item.sizeBytes) }}
+                  <template v-if="item.voiceId"> · {{ voiceLabel(item.voiceId) }}</template>
+                </span>
+                <span v-if="item.textPreview" class="audio-history-preview">{{ item.textPreview }}</span>
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <p v-if="audioErrorMessage" class="error-message">
+          <AlertTriangle :size="16" />
+          <span>{{ audioErrorMessage }}</span>
+        </p>
+      </section>
+
+      <section class="panel video-panel" aria-labelledby="video-title">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">HeyGen · 音频驱动</span>
+            <h2 id="video-title">视频生成</h2>
+          </div>
+          <Video :size="20" />
+        </div>
+
+        <div class="video-config">
+          <div class="portrait-upload">
+            <input
+              ref="portraitInput"
+              class="sr-only"
+              type="file"
+              accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+              @change="onPortraitSelected"
+            />
+            <button
+              class="secondary-action portrait-upload-button"
+              type="button"
+              :disabled="portraitUploading"
+              @click="portraitInput?.click()"
+            >
+              <Loader2 v-if="portraitUploading" :size="18" class="spin" />
+              <ImagePlus v-else :size="18" />
+              <span>{{ portraitUploading ? '上传中' : portraitPreviewUrl ? '重新上传人像' : '上传人像图片' }}</span>
+            </button>
+            <button
+              v-if="portraitPreviewUrl"
+              class="icon-button"
+              type="button"
+              title="清除人像"
+              @click="clearPortrait"
+            >
+              <XCircle :size="18" />
+            </button>
+          </div>
+
+          <div v-if="portraitPreviewUrl" class="portrait-preview">
+            <img :src="portraitPreviewUrl" :alt="portraitFileName || '人像预览'" />
+            <span v-if="portraitFileName">{{ portraitFileName }}</span>
+          </div>
+          <p v-else class="voice-hint">支持 JPG / PNG。生成时会上传到 HeyGen Assets，再用已有音频做口型驱动。</p>
+
+          <div class="portrait-history">
+            <div class="portrait-history-head">
+              <div class="portrait-history-title">
+                <History :size="16" />
+                <span>历史人像</span>
+              </div>
+              <button
+                class="icon-button"
+                type="button"
+                title="刷新历史"
+                :disabled="portraitHistoryLoading"
+                @click="refreshPortraitHistory"
+              >
+                <Loader2 v-if="portraitHistoryLoading" :size="16" class="spin" />
+                <RefreshCcw v-else :size="16" />
+              </button>
+            </div>
+            <p v-if="!portraitHistory.length && !portraitHistoryLoading" class="voice-hint">暂无历史，上传后会出现在这里。</p>
+            <div v-else class="portrait-history-grid">
+              <button
+                v-for="item in portraitHistory"
+                :key="item.id"
+                type="button"
+                class="portrait-history-item"
+                :class="{
+                  active:
+                    selectedPortraitHistoryId === item.id ||
+                    form.portraitAssetId === item.portraitPath,
+                }"
+                :title="item.fileName"
+                @click="selectPortraitHistory(item)"
+              >
+                <img :src="item.portraitUrl" :alt="item.fileName" loading="lazy" />
+                <span>{{ item.fileName }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="field-grid video-options">
+            <label class="field">
+              <span>分辨率</span>
+              <select v-model="form.resolution">
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+                <option value="4k">4K</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>画面比例</span>
+              <select v-model="form.aspectRatio">
+                <option value="auto">auto（跟原图）</option>
+                <option value="16:9">16:9 横屏</option>
+                <option value="9:16">9:16 竖屏</option>
+                <option value="1:1">1:1 方形</option>
+                <option value="4:5">4:5</option>
+                <option value="5:4">5:4</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>画面适配</span>
+              <select v-model="form.fit">
+                <option value="">自动</option>
+                <option value="cover">cover 铺满裁切</option>
+                <option value="contain">contain 完整容纳</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>输出格式</span>
+              <select v-model="form.outputFormat">
+                <option value="mp4">MP4</option>
+                <option value="webm">WebM 透明背景</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>表情幅度</span>
+              <select v-model="form.expressiveness">
+                <option value="low">low 低</option>
+                <option value="medium">medium 中</option>
+                <option value="high">high 高</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>背景</span>
+              <select v-model="form.backgroundType" :disabled="form.outputFormat === 'webm' || form.removeBackground">
+                <option value="none">默认 / 保留原图</option>
+                <option value="color">纯色背景</option>
+              </select>
+            </label>
+
+            <label v-if="form.backgroundType === 'color' && form.outputFormat !== 'webm' && !form.removeBackground" class="field">
+              <span>背景颜色</span>
+              <input v-model="form.backgroundColor" type="color" />
+            </label>
+
+            <label class="field checkbox-field">
+              <span>去除背景</span>
+              <input v-model="form.removeBackground" type="checkbox" :disabled="form.outputFormat === 'webm'" />
+            </label>
+
+            <label class="field checkbox-field">
+              <span>烧录字幕</span>
+              <input v-model="form.burnCaptions" type="checkbox" />
+            </label>
+
+            <label class="field wide-field">
+              <span>动作提示（motion prompt）</span>
+              <input v-model="form.motionPrompt" type="text" maxlength="500" placeholder="例如：自然点头、偶尔微笑，保持上半身稳定" />
+            </label>
+          </div>
+
+          <p v-if="portraitErrorMessage" class="error-message compact-message">
+            <AlertTriangle :size="16" />
+            <span>{{ portraitErrorMessage }}</span>
+          </p>
+        </div>
+
+        <p class="voice-hint">使用已生成音频做口型驱动（HeyGen Image-to-Video + audio），不重新 TTS。</p>
+
+        <button class="primary-action" type="button" :disabled="!canGenerateVideo || videoGenerating" @click="runVideoGeneration">
+          <Loader2 v-if="videoGenerating" :size="19" class="spin" />
+          <Video v-else :size="19" />
+          <span>{{ videoGenerating ? '视频生成中' : '生成视频' }}</span>
+        </button>
+
+        <div v-if="videoGenerating || videoProgressPercent > 0" class="video-progress">
+          <div class="video-progress-meta">
+            <span>{{ videoProgressMessage || '准备中…' }}</span>
+            <strong>{{ Math.min(100, Math.max(0, videoProgressPercent)) }}%</strong>
+          </div>
+          <div class="video-progress-track" aria-hidden="true">
+            <div class="video-progress-bar" :style="{ width: `${Math.min(100, Math.max(0, videoProgressPercent))}%` }" />
+          </div>
+          <p v-if="videoTaskId" class="voice-hint">任务 ID：{{ videoTaskId }}</p>
+        </div>
+
+        <p v-if="videoErrorMessage" class="error-message">
+          <AlertTriangle :size="16" />
+          <span>{{ videoErrorMessage }}</span>
+        </p>
+
+        <div class="video-history">
+          <div class="video-history-head">
+            <div class="video-history-title">
+              <History :size="16" />
+              <span>历史视频</span>
+            </div>
+            <button
+              class="icon-button"
+              type="button"
+              title="刷新历史"
+              :disabled="videoHistoryLoading"
+              @click="refreshVideoHistory"
+            >
+              <Loader2 v-if="videoHistoryLoading" :size="16" class="spin" />
+              <RefreshCcw v-else :size="16" />
+            </button>
+          </div>
+          <p v-if="!videoHistory.length && !videoHistoryLoading" class="voice-hint">暂无历史，生成后会出现在这里，可直接选用。</p>
+          <ul v-else class="video-history-list">
+            <li v-for="item in videoHistory" :key="item.id">
+              <button
+                type="button"
+                class="video-history-item"
+                :class="{
+                  active:
+                    selectedVideoHistoryId === item.id ||
+                    videoResult?.localVideoPath === item.localVideoPath ||
+                    result?.localVideoPath === item.localVideoPath,
+                }"
+                @click="selectVideoHistory(item)"
+              >
+                <span class="video-history-name">{{ item.fileName }}</span>
+                <span class="video-history-meta">
+                  {{ formatAudioTime(item.createdAt) }}
+                  · {{ formatAudioSize(item.sizeBytes) }}
+                  <template v-if="item.resolution"> · {{ item.resolution }}</template>
+                </span>
+                <span v-if="item.title || item.textPreview" class="video-history-preview">
+                  {{ item.title || item.textPreview }}
+                </span>
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <div class="video-result-block">
+          <div class="panel-heading tight">
+            <div>
+              <span class="eyebrow">Output</span>
+              <h2 id="result-title">生成结果</h2>
+            </div>
+            <UploadCloud :size="20" />
+          </div>
+
+          <div v-if="audioPreviewUrl" class="audio-player">
+            <Mic2 :size="18" />
+            <audio :src="audioPreviewUrl" controls />
+            <button class="icon-button" type="button" title="下载音频" @click="downloadGeneratedAudio">
+              <Download :size="18" />
+            </button>
+          </div>
+
+          <div class="result-frame">
+            <video v-if="showVideoPlayer" class="video-player" :src="videoPreviewUrl" controls playsinline />
+            <div v-else-if="videoPreviewUrl || result?.localVideoPath || videoResult?.localVideoPath" class="video-placeholder ready">
+              <Video :size="36" />
+              <span>{{ videoPreviewUrl || result?.localVideoPath || videoResult?.localVideoPath }}</span>
+            </div>
+            <div v-else class="video-placeholder">
+              <Video :size="36" />
+              <span>{{ audioPreviewUrl ? '音频已生成，等待视频生成' : '等待生成' }}</span>
+            </div>
+          </div>
+
+          <dl class="result-list">
+            <div>
+              <dt><Hash :size="15" />任务 ID</dt>
+              <dd>{{ result?.videoTaskId || videoResult?.taskId || result?.jobId || audioResult?.taskId || audioResult?.requestId || '未创建' }}</dd>
+            </div>
+            <div>
+              <dt><Mic2 :size="15" />音频</dt>
+              <dd>{{ result?.audioPath || audioResult?.audioPath || '未生成' }}</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+    </main>
+  </div>
+</template>
