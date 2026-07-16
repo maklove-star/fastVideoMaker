@@ -1,10 +1,9 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import type { Component } from 'vue';
 import {
   AlertTriangle,
   CheckCircle2,
-  Circle,
   Download,
   FileText,
   Hash,
@@ -12,10 +11,8 @@ import {
   Link2,
   Loader2,
   Mic2,
-  Monitor,
   RefreshCcw,
   History,
-  Smartphone,
   Sparkles,
   UploadCloud,
   Video,
@@ -23,13 +20,14 @@ import {
   Wand2,
   XCircle,
 } from '@lucide/vue';
-import { generateAudio, generateVideo, listAudioHistory, listVoices, previewAudio, processScript, uploadPortrait } from './api/digitalHuman';
+import { generateAudio, generateVideo, listAudioHistory, listVideoHistory, listVoices, previewAudio, processScript, queryVideoStatus, uploadPortrait } from './api/digitalHuman';
 import type {
   AudioGenerateResult,
   AudioHistoryItem,
   InputMode,
   StepState,
   VideoGenerateResult,
+  VideoHistoryItem,
   VoiceOption,
   WorkflowPayload,
   WorkflowResult,
@@ -72,6 +70,15 @@ const form = reactive<WorkflowPayload>({
   volumeRatio: 1,
   pitchRatio: 1,
   resolution: '720p',
+  aspectRatio: 'auto',
+  fit: '',
+  removeBackground: false,
+  outputFormat: 'mp4',
+  expressiveness: 'low',
+  motionPrompt: '',
+  backgroundType: 'none',
+  backgroundColor: '#FFFFFF',
+  burnCaptions: false,
   volcCvMode: 'normal',
   publishNow: false,
   platforms: [],
@@ -90,12 +97,18 @@ const audioResult = ref<AudioGenerateResult | null>(null);
 const audioHistory = ref<AudioHistoryItem[]>([]);
 const selectedAudioHistoryId = ref('');
 const audioHistoryLoading = ref(false);
+const videoHistory = ref<VideoHistoryItem[]>([]);
+const selectedVideoHistoryId = ref('');
+const videoHistoryLoading = ref(false);
 const videoResult = ref<VideoGenerateResult | null>(null);
 const voicePreviewUrl = ref('');
 const voicePreviewHint = ref('');
 const scriptErrorMessage = ref('');
 const audioErrorMessage = ref('');
 const videoErrorMessage = ref('');
+const videoProgressPercent = ref(0);
+const videoProgressMessage = ref('');
+const videoTaskId = ref('');
 const voicePreviewError = ref('');
 const scriptProcessing = ref(false);
 const audioGenerating = ref(false);
@@ -108,7 +121,6 @@ const portraitErrorMessage = ref('');
 const portraitInput = ref<HTMLInputElement | null>(null);
 const loadingVoices = ref(false);
 const audioUnlocked = ref(false);
-const apiStatus = ref<'checking' | 'ready' | 'offline'>('checking');
 const previewPlayer = ref<HTMLAudioElement | null>(null);
 
 const inputLabel = computed(() => {
@@ -223,17 +235,14 @@ function setStepState(key: WorkflowStepKey, state: StepState) {
 
 async function refreshVoices() {
   loadingVoices.value = true;
-  apiStatus.value = 'checking';
   try {
     const voices = await listVoices();
     voiceOptions.value = voices.length ? voices : defaultVoices;
     if (!voiceOptions.value.some((voice) => voice.id === form.voiceId)) {
       form.voiceId = voiceOptions.value[0]?.id || '';
     }
-    apiStatus.value = 'ready';
   } catch {
     voiceOptions.value = defaultVoices;
-    apiStatus.value = 'offline';
   } finally {
     loadingVoices.value = false;
   }
@@ -293,6 +302,48 @@ function selectAudioHistory(item: AudioHistoryItem) {
   setStepState('audio', 'done');
 }
 
+async function refreshVideoHistory() {
+  videoHistoryLoading.value = true;
+  try {
+    videoHistory.value = await listVideoHistory(50);
+    if (
+      selectedVideoHistoryId.value &&
+      !videoHistory.value.some((item) => item.id === selectedVideoHistoryId.value)
+    ) {
+      selectedVideoHistoryId.value = '';
+    }
+  } catch {
+    // keep previous list if API temporarily offline
+  } finally {
+    videoHistoryLoading.value = false;
+  }
+}
+
+function selectVideoHistory(item: VideoHistoryItem) {
+  selectedVideoHistoryId.value = item.id;
+  videoResult.value = {
+    videoUrl: item.videoUrl,
+    localVideoPath: item.localVideoPath,
+    taskId: item.taskId || item.id,
+    sourceVideoUrl: item.sourceVideoUrl,
+    status: 'completed',
+    message: '历史视频',
+    progressPercent: 100,
+  };
+  result.value = {
+    ...(result.value || {}),
+    videoUrl: item.videoUrl,
+    localVideoPath: item.localVideoPath,
+    videoTaskId: item.taskId || item.id,
+    sourceVideoUrl: item.sourceVideoUrl,
+  };
+  videoTaskId.value = item.taskId || item.id;
+  videoProgressPercent.value = 100;
+  videoProgressMessage.value = '历史视频';
+  videoErrorMessage.value = '';
+  setStepState('video', 'done');
+}
+
 async function unlockPreviewPlayer() {
   const player = previewPlayer.value;
   if (!player || audioUnlocked.value) return;
@@ -333,7 +384,6 @@ async function runVoicePreview() {
     }
     const playableUrl = `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
     voicePreviewUrl.value = playableUrl;
-    apiStatus.value = 'ready';
 
     const played = await playPreview(playableUrl);
     voicePreviewHint.value = played
@@ -401,10 +451,8 @@ async function runLinkScriptExtraction() {
     audioResult.value = null;
     videoResult.value = null;
     setStepState('script', 'done');
-    apiStatus.value = 'ready';
   } catch (error) {
     setStepState('script', 'error');
-    apiStatus.value = 'offline';
     scriptErrorMessage.value = error instanceof Error ? error.message : '链接文案提取失败';
   } finally {
     scriptProcessing.value = false;
@@ -436,15 +484,17 @@ async function runAudioGeneration() {
       sourceAudioUrl: generatedAudio.sourceAudioUrl,
     };
     setStepState('audio', 'done');
-    apiStatus.value = 'ready';
     void refreshAudioHistory();
   } catch (error) {
     setStepState('audio', 'error');
-    apiStatus.value = 'offline';
     audioErrorMessage.value = error instanceof Error ? error.message : '音频生成失败';
   } finally {
     audioGenerating.value = false;
   }
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function runVideoGeneration() {
@@ -452,18 +502,88 @@ async function runVideoGeneration() {
 
   videoGenerating.value = true;
   videoErrorMessage.value = '';
+  videoProgressPercent.value = 5;
+  videoProgressMessage.value = '上传素材并提交 HeyGen…';
+  videoTaskId.value = '';
   setStepState('video', 'running');
 
   try {
-    const generatedVideo = await generateVideo({
+    const started = await generateVideo({
       portraitAssetId: form.portraitAssetId,
       audioPath: latestAudioPath.value,
       audioUrl: latestAudioRemoteUrl.value || undefined,
       script: scriptForVideo.value,
+      title: form.title || undefined,
       resolution: form.resolution,
+      aspectRatio: form.aspectRatio,
+      fit: form.fit,
+      removeBackground: form.removeBackground,
+      outputFormat: form.outputFormat,
+      expressiveness: form.expressiveness,
+      motionPrompt: form.motionPrompt || undefined,
+      backgroundType: form.backgroundType,
+      backgroundColor: form.backgroundColor,
+      burnCaptions: form.burnCaptions,
       volcCvMode: form.volcCvMode,
     });
+
+    // Non-HeyGen / sync providers may return the finished video directly.
+    if (started.videoUrl || started.localVideoPath) {
+      videoResult.value = started;
+      selectedVideoHistoryId.value = started.taskId || '';
+      result.value = {
+        ...(result.value || {}),
+        videoUrl: started.videoUrl,
+        localVideoPath: started.localVideoPath,
+        videoTaskId: started.taskId,
+        sourceVideoUrl: started.sourceVideoUrl,
+      };
+      videoProgressPercent.value = 100;
+      videoProgressMessage.value = started.message || '已完成';
+      setStepState('video', 'done');
+      void refreshVideoHistory();
+      return;
+    }
+
+    const taskId = (started.taskId || '').trim();
+    if (!taskId) {
+      throw new Error('未拿到 video_id / taskId，无法查询进度');
+    }
+    videoTaskId.value = taskId;
+    videoProgressPercent.value = started.progressPercent ?? 15;
+    videoProgressMessage.value = started.message || '已提交，开始轮询状态…';
+
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let generatedVideo: VideoGenerateResult | null = null;
+    while (Date.now() < deadline) {
+      await sleep(8000);
+      const status = await queryVideoStatus(taskId);
+      videoProgressPercent.value = status.progressPercent ?? videoProgressPercent.value;
+      videoProgressMessage.value = status.message || status.status;
+      if (status.status === 'failed') {
+        throw new Error(status.failureMessage || status.message || 'HeyGen 生成失败');
+      }
+      if (status.status === 'completed' && (status.videoUrl || status.sourceVideoUrl)) {
+        generatedVideo = {
+          videoUrl: status.videoUrl,
+          localVideoPath: status.localVideoPath,
+          taskId: status.taskId,
+          sourceVideoUrl: status.sourceVideoUrl,
+          status: status.status,
+          message: status.message,
+          progressPercent: status.progressPercent,
+          videoPageUrl: status.videoPageUrl,
+        };
+        break;
+      }
+    }
+
+    if (!generatedVideo) {
+      throw new Error('视频生成超时，请稍后在 HeyGen 控制台查看或重试');
+    }
+
     videoResult.value = generatedVideo;
+    selectedVideoHistoryId.value = generatedVideo.taskId || taskId;
     result.value = {
       ...(result.value || {}),
       videoUrl: generatedVideo.videoUrl,
@@ -471,11 +591,12 @@ async function runVideoGeneration() {
       videoTaskId: generatedVideo.taskId,
       sourceVideoUrl: generatedVideo.sourceVideoUrl,
     };
+    videoProgressPercent.value = 100;
+    videoProgressMessage.value = '已完成';
     setStepState('video', 'done');
-    apiStatus.value = 'ready';
+    void refreshVideoHistory();
   } catch (error) {
     setStepState('video', 'error');
-    apiStatus.value = 'offline';
     videoErrorMessage.value = error instanceof Error ? error.message : '视频生成失败';
   } finally {
     videoGenerating.value = false;
@@ -495,7 +616,6 @@ async function onPortraitSelected(event: Event) {
     form.portraitAssetId = uploaded.portraitPath;
     portraitPreviewUrl.value = uploaded.portraitUrl;
     portraitFileName.value = uploaded.fileName;
-    apiStatus.value = 'ready';
   } catch (error) {
     form.portraitAssetId = '';
     portraitPreviewUrl.value = '';
@@ -540,35 +660,39 @@ onMounted(() => {
   resetSteps();
   void refreshVoices();
   void refreshAudioHistory();
+  void refreshVideoHistory();
 });
 </script>
 
 <template>
   <div class="app-shell">
-    <header class="topbar">
-      <div class="brand-lockup">
-        <div class="brand-mark" aria-hidden="true">
-          <Video :size="24" />
+    <ol class="flow-progress" aria-label="生成流程">
+      <li
+        v-for="(step, index) in steps"
+        :key="step.key"
+        class="flow-step"
+        :class="step.state"
+      >
+        <div class="flow-node">
+          <span class="flow-index" aria-hidden="true">
+            <Loader2 v-if="step.state === 'running'" :size="16" class="spin" />
+            <CheckCircle2 v-else-if="step.state === 'done'" :size="16" />
+            <AlertTriangle v-else-if="step.state === 'error'" :size="16" />
+            <span v-else>{{ index + 1 }}</span>
+          </span>
+          <span class="flow-label">{{ step.label }}</span>
         </div>
-        <div>
-          <h1>数字人短视频智能体</h1>
-          <span>Vue 3 + FastAPI 工作台</span>
-        </div>
-      </div>
-
-      <div class="topbar-actions">
-        <span class="status-pill" :class="apiStatus">
-          <Loader2 v-if="apiStatus === 'checking'" :size="16" class="spin" />
-          <CheckCircle2 v-else-if="apiStatus === 'ready'" :size="16" />
-          <XCircle v-else :size="16" />
-          {{ apiStatus === 'ready' ? 'API 就绪' : apiStatus === 'checking' ? '检查接口' : 'API 未连接' }}
-        </span>
-        <span class="device-pill">
-          <Monitor :size="16" />
-          <Smartphone :size="16" />
-        </span>
-      </div>
-    </header>
+        <span
+          v-if="index < steps.length - 1"
+          class="flow-connector"
+          :class="{
+            active: step.state === 'done' || step.state === 'running',
+            done: step.state === 'done',
+          }"
+          aria-hidden="true"
+        />
+      </li>
+    </ol>
 
     <main class="workspace">
       <section class="panel input-panel" aria-labelledby="input-title">
@@ -764,82 +888,204 @@ onMounted(() => {
         </p>
       </section>
 
-      <aside class="side-stack">
-        <section class="panel video-panel" aria-labelledby="video-title">
-          <div class="panel-heading">
-            <div>
-              <span class="eyebrow">Volc CV · 单图音频驱动</span>
-              <h2 id="video-title">视频生成</h2>
-            </div>
-            <Video :size="20" />
+      <section class="panel video-panel" aria-labelledby="video-title">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">HeyGen · 音频驱动</span>
+            <h2 id="video-title">视频生成</h2>
+          </div>
+          <Video :size="20" />
+        </div>
+
+        <div class="video-config">
+          <div class="portrait-upload">
+            <input
+              ref="portraitInput"
+              class="sr-only"
+              type="file"
+              accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+              @change="onPortraitSelected"
+            />
+            <button
+              class="secondary-action portrait-upload-button"
+              type="button"
+              :disabled="portraitUploading"
+              @click="portraitInput?.click()"
+            >
+              <Loader2 v-if="portraitUploading" :size="18" class="spin" />
+              <ImagePlus v-else :size="18" />
+              <span>{{ portraitUploading ? '上传中' : portraitPreviewUrl ? '重新上传人像' : '上传人像图片' }}</span>
+            </button>
+            <button
+              v-if="portraitPreviewUrl"
+              class="icon-button"
+              type="button"
+              title="清除人像"
+              @click="clearPortrait"
+            >
+              <XCircle :size="18" />
+            </button>
           </div>
 
-          <div class="video-config">
-            <div class="portrait-upload">
-              <input
-                ref="portraitInput"
-                class="sr-only"
-                type="file"
-                accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
-                @change="onPortraitSelected"
-              />
-              <button
-                class="secondary-action portrait-upload-button"
-                type="button"
-                :disabled="portraitUploading"
-                @click="portraitInput?.click()"
-              >
-                <Loader2 v-if="portraitUploading" :size="18" class="spin" />
-                <ImagePlus v-else :size="18" />
-                <span>{{ portraitUploading ? '上传中' : portraitPreviewUrl ? '重新上传人像' : '上传人像图片' }}</span>
-              </button>
-              <button
-                v-if="portraitPreviewUrl"
-                class="icon-button"
-                type="button"
-                title="清除人像"
-                @click="clearPortrait"
-              >
-                <XCircle :size="18" />
-              </button>
-            </div>
+          <div v-if="portraitPreviewUrl" class="portrait-preview">
+            <img :src="portraitPreviewUrl" :alt="portraitFileName || '人像预览'" />
+            <span v-if="portraitFileName">{{ portraitFileName }}</span>
+          </div>
+          <p v-else class="voice-hint">支持 JPG / PNG。生成时会上传到 HeyGen Assets，再用已有音频做口型驱动。</p>
 
-            <div v-if="portraitPreviewUrl" class="portrait-preview">
-              <img :src="portraitPreviewUrl" :alt="portraitFileName || '人像预览'" />
-              <span v-if="portraitFileName">{{ portraitFileName }}</span>
-            </div>
-            <p v-else class="voice-hint">支持 JPG / PNG / WEBP。本地开发未配置 PUBLIC_BASE_URL 时，会自动上传临时公网地址供火山拉取。</p>
-
+          <div class="field-grid video-options">
             <label class="field">
-              <span>驱动模式</span>
-              <select v-model="form.volcCvMode">
-                <option value="normal">普通模式（嘴部）</option>
-                <option value="loopy">灵动模式（全脸）</option>
-                <option value="loopyb">大画幅灵动</option>
+              <span>分辨率</span>
+              <select v-model="form.resolution">
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+                <option value="4k">4K</option>
               </select>
             </label>
 
-            <p v-if="portraitErrorMessage" class="error-message compact-message">
-              <AlertTriangle :size="16" />
-              <span>{{ portraitErrorMessage }}</span>
-            </p>
+            <label class="field">
+              <span>画面比例</span>
+              <select v-model="form.aspectRatio">
+                <option value="auto">auto（跟原图）</option>
+                <option value="16:9">16:9 横屏</option>
+                <option value="9:16">9:16 竖屏</option>
+                <option value="1:1">1:1 方形</option>
+                <option value="4:5">4:5</option>
+                <option value="5:4">5:4</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>画面适配</span>
+              <select v-model="form.fit">
+                <option value="">自动</option>
+                <option value="cover">cover 铺满裁切</option>
+                <option value="contain">contain 完整容纳</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>输出格式</span>
+              <select v-model="form.outputFormat">
+                <option value="mp4">MP4</option>
+                <option value="webm">WebM 透明背景</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>表情幅度</span>
+              <select v-model="form.expressiveness">
+                <option value="low">low 低</option>
+                <option value="medium">medium 中</option>
+                <option value="high">high 高</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>背景</span>
+              <select v-model="form.backgroundType" :disabled="form.outputFormat === 'webm' || form.removeBackground">
+                <option value="none">默认 / 保留原图</option>
+                <option value="color">纯色背景</option>
+              </select>
+            </label>
+
+            <label v-if="form.backgroundType === 'color' && form.outputFormat !== 'webm' && !form.removeBackground" class="field">
+              <span>背景颜色</span>
+              <input v-model="form.backgroundColor" type="color" />
+            </label>
+
+            <label class="field checkbox-field">
+              <span>去除背景</span>
+              <input v-model="form.removeBackground" type="checkbox" :disabled="form.outputFormat === 'webm'" />
+            </label>
+
+            <label class="field checkbox-field">
+              <span>烧录字幕</span>
+              <input v-model="form.burnCaptions" type="checkbox" />
+            </label>
+
+            <label class="field wide-field">
+              <span>动作提示（motion prompt）</span>
+              <input v-model="form.motionPrompt" type="text" maxlength="500" placeholder="例如：自然点头、偶尔微笑，保持上半身稳定" />
+            </label>
           </div>
 
-          <p class="voice-hint">使用已生成音频做口型驱动（火山单图音频驱动），不重新 TTS。</p>
-
-          <button class="primary-action" type="button" :disabled="!canGenerateVideo || videoGenerating" @click="runVideoGeneration">
-            <Loader2 v-if="videoGenerating" :size="19" class="spin" />
-            <Video v-else :size="19" />
-            <span>{{ videoGenerating ? '视频生成中' : '生成视频' }}</span>
-          </button>
-
-          <p v-if="videoErrorMessage" class="error-message">
+          <p v-if="portraitErrorMessage" class="error-message compact-message">
             <AlertTriangle :size="16" />
-            <span>{{ videoErrorMessage }}</span>
+            <span>{{ portraitErrorMessage }}</span>
           </p>
-        </section>
+        </div>
 
-        <section class="panel result-panel" aria-labelledby="result-title">
+        <p class="voice-hint">使用已生成音频做口型驱动（HeyGen Image-to-Video + audio），不重新 TTS。</p>
+
+        <button class="primary-action" type="button" :disabled="!canGenerateVideo || videoGenerating" @click="runVideoGeneration">
+          <Loader2 v-if="videoGenerating" :size="19" class="spin" />
+          <Video v-else :size="19" />
+          <span>{{ videoGenerating ? '视频生成中' : '生成视频' }}</span>
+        </button>
+
+        <div v-if="videoGenerating || videoProgressPercent > 0" class="video-progress">
+          <div class="video-progress-meta">
+            <span>{{ videoProgressMessage || '准备中…' }}</span>
+            <strong>{{ Math.min(100, Math.max(0, videoProgressPercent)) }}%</strong>
+          </div>
+          <div class="video-progress-track" aria-hidden="true">
+            <div class="video-progress-bar" :style="{ width: `${Math.min(100, Math.max(0, videoProgressPercent))}%` }" />
+          </div>
+          <p v-if="videoTaskId" class="voice-hint">任务 ID：{{ videoTaskId }}</p>
+        </div>
+
+        <p v-if="videoErrorMessage" class="error-message">
+          <AlertTriangle :size="16" />
+          <span>{{ videoErrorMessage }}</span>
+        </p>
+
+        <div class="video-history">
+          <div class="video-history-head">
+            <div class="video-history-title">
+              <History :size="16" />
+              <span>历史视频</span>
+            </div>
+            <button
+              class="icon-button"
+              type="button"
+              title="刷新历史"
+              :disabled="videoHistoryLoading"
+              @click="refreshVideoHistory"
+            >
+              <Loader2 v-if="videoHistoryLoading" :size="16" class="spin" />
+              <RefreshCcw v-else :size="16" />
+            </button>
+          </div>
+          <p v-if="!videoHistory.length && !videoHistoryLoading" class="voice-hint">暂无历史，生成后会出现在这里，可直接选用。</p>
+          <ul v-else class="video-history-list">
+            <li v-for="item in videoHistory" :key="item.id">
+              <button
+                type="button"
+                class="video-history-item"
+                :class="{
+                  active:
+                    selectedVideoHistoryId === item.id ||
+                    videoResult?.localVideoPath === item.localVideoPath ||
+                    result?.localVideoPath === item.localVideoPath,
+                }"
+                @click="selectVideoHistory(item)"
+              >
+                <span class="video-history-name">{{ item.fileName }}</span>
+                <span class="video-history-meta">
+                  {{ formatAudioTime(item.createdAt) }}
+                  · {{ formatAudioSize(item.sizeBytes) }}
+                  <template v-if="item.resolution"> · {{ item.resolution }}</template>
+                </span>
+                <span v-if="item.title || item.textPreview" class="video-history-preview">
+                  {{ item.title || item.textPreview }}
+                </span>
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <div class="video-result-block">
           <div class="panel-heading tight">
             <div>
               <span class="eyebrow">Output</span>
@@ -847,18 +1093,6 @@ onMounted(() => {
             </div>
             <UploadCloud :size="20" />
           </div>
-
-          <ol class="timeline compact-timeline">
-            <li v-for="step in steps" :key="step.key" :class="step.state">
-              <span class="step-icon">
-                <Loader2 v-if="step.state === 'running'" :size="16" class="spin" />
-                <CheckCircle2 v-else-if="step.state === 'done'" :size="16" />
-                <AlertTriangle v-else-if="step.state === 'error'" :size="16" />
-                <Circle v-else :size="16" />
-              </span>
-              <span>{{ step.label }}</span>
-            </li>
-          </ol>
 
           <div v-if="audioPreviewUrl" class="audio-player">
             <Mic2 :size="18" />
@@ -890,8 +1124,8 @@ onMounted(() => {
               <dd>{{ result?.audioPath || audioResult?.audioPath || '未生成' }}</dd>
             </div>
           </dl>
-        </section>
-      </aside>
+        </div>
+      </section>
     </main>
   </div>
 </template>

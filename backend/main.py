@@ -22,6 +22,8 @@ from .schemas import (
     ScriptProcessResponse,
     VideoGenerateRequest,
     VideoGenerateResponse,
+    VideoHistoryResponse,
+    VideoStatusResponse,
     VoiceOption,
     WorkflowPayload,
     WorkflowResult,
@@ -29,8 +31,8 @@ from .schemas import (
 from .script_processor import process_script
 from .utils.file_utils import ensure_parent, output_url
 from .utils.logger import get_logger
-from .video_generator import generate_digital_human
-
+from .video_generator import generate_digital_human, query_heygen_video_status, start_heygen_video
+from .video_history import list_video_history, save_video_history_meta
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -145,6 +147,11 @@ def audio_history(limit: int = 50) -> AudioHistoryResponse:
     return AudioHistoryResponse(items=list_audio_history(limit=limit))
 
 
+@app.get("/api/video/history", response_model=VideoHistoryResponse)
+def video_history(limit: int = 50) -> VideoHistoryResponse:
+    return VideoHistoryResponse(items=list_video_history(limit=limit))
+
+
 @app.post("/api/audio/preview", response_model=AudioGenerateResponse)
 def audio_preview(payload: AudioPreviewRequest) -> AudioGenerateResponse:
     try:
@@ -213,9 +220,44 @@ def audio_generate(payload: AudioGenerateRequest) -> AudioGenerateResponse:
         raise _http_error(error) from error
 
 
+def _heygen_options_from_payload(payload: VideoGenerateRequest) -> dict:
+    return {
+        "title": payload.title,
+        "aspect_ratio": payload.aspectRatio,
+        "fit": payload.fit,
+        "remove_background": payload.removeBackground,
+        "output_format": payload.outputFormat,
+        "expressiveness": payload.expressiveness,
+        "motion_prompt": payload.motionPrompt,
+        "background_type": payload.backgroundType,
+        "background_color": payload.backgroundColor,
+        "burn_captions": payload.burnCaptions,
+    }
+
+
 @app.post("/api/video/generate", response_model=VideoGenerateResponse)
 def video_generate(payload: VideoGenerateRequest) -> VideoGenerateResponse:
+    """Start HeyGen job (fast return) or run full blocking generate for other providers."""
     try:
+        provider = (settings.video_provider or "heygen").strip().lower()
+        heygen_opts = _heygen_options_from_payload(payload)
+        if provider in {"heygen", "hey_gen"} and settings.enable_real_video:
+            started = start_heygen_video(
+                payload.portraitAssetId,
+                payload.audioPath,
+                payload.script,
+                resolution=payload.resolution,
+                audio_source_url=payload.audioUrl,
+                **heygen_opts,
+            )
+            return VideoGenerateResponse(
+                taskId=started.task_id,
+                status=started.status,
+                message=started.message,
+                progressPercent=started.progress_percent,
+                videoPageUrl=started.video_page_url,
+            )
+
         video_result = generate_digital_human(
             payload.portraitAssetId,
             payload.audioPath,
@@ -223,15 +265,58 @@ def video_generate(payload: VideoGenerateRequest) -> VideoGenerateResponse:
             resolution=payload.resolution,
             audio_source_url=payload.audioUrl,
             volc_cv_mode=payload.volcCvMode,
+            **heygen_opts,
+        )
+        save_video_history_meta(
+            video_path=video_result.local_video_path,
+            video_url=video_result.video_url,
+            source_video_url=video_result.source_video_url,
+            task_id=video_result.task_id,
+            script=payload.script,
+            title=payload.title,
+            resolution=payload.resolution,
+            portrait_path=payload.portraitAssetId,
         )
         return VideoGenerateResponse(
             videoUrl=video_result.video_url,
             localVideoPath=video_result.local_video_path,
             taskId=video_result.task_id,
             sourceVideoUrl=video_result.source_video_url,
+            status="completed" if video_result.video_url or video_result.local_video_path else "placeholder",
+            message="完成",
+            progressPercent=100,
         )
     except Exception as error:  # noqa: BLE001
         logger.exception("Video generation failed")
+        raise _http_error(error) from error
+
+
+@app.get("/api/video/status/{task_id}", response_model=VideoStatusResponse)
+def video_status(task_id: str) -> VideoStatusResponse:
+    """Poll HeyGen GET /v3/videos/{video_id} — status only, no percent from vendor."""
+    try:
+        snapshot = query_heygen_video_status(task_id)
+        if snapshot.status == "completed" and snapshot.local_video_path:
+            save_video_history_meta(
+                video_path=snapshot.local_video_path,
+                video_url=snapshot.video_url,
+                source_video_url=snapshot.source_video_url,
+                task_id=snapshot.task_id or task_id,
+            )
+        return VideoStatusResponse(
+            taskId=snapshot.task_id,
+            status=snapshot.status,
+            message=snapshot.message,
+            progressPercent=snapshot.progress_percent,
+            videoUrl=snapshot.video_url,
+            localVideoPath=snapshot.local_video_path,
+            sourceVideoUrl=snapshot.source_video_url,
+            videoPageUrl=snapshot.video_page_url,
+            failureCode=snapshot.failure_code,
+            failureMessage=snapshot.failure_message,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Video status query failed task_id=%s", task_id)
         raise _http_error(error) from error
 
 
@@ -269,6 +354,16 @@ def workflow_generate(payload: WorkflowPayload) -> WorkflowResult:
             script,
             resolution=payload.resolution,
             audio_source_url=audio_result.source_audio_url or audio_result.audio_url,
+        )
+        save_video_history_meta(
+            video_path=video_result.local_video_path,
+            video_url=video_result.video_url,
+            source_video_url=video_result.source_video_url,
+            task_id=video_result.task_id or job_id,
+            script=script,
+            title=payload.title,
+            resolution=payload.resolution,
+            portrait_path=payload.portraitAssetId,
         )
         publish_results = []
         if payload.publishNow:

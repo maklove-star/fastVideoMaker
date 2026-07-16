@@ -8,8 +8,9 @@
 - 后端：FastAPI API 骨架
 - 文案：火山方舟豆包 Responses API（`doubao-seed-evolving`）
 - 音频：豆包音频 1.0，同步接口兜底；异步长文本 TTS 支持声音克隆 Speaker ID
-- 视频：火山视觉「单图音频驱动」（形象创建 + 音频驱动）
-  文档：https://docs.volcengine.com/docs/86081/1804513
+- 视频：HeyGen Image-to-Video（人像图 + 已生成音频做口型驱动）
+  文档：https://developers.heygen.com/image-to-video
+  Quick start：https://developers.heygen.com/docs/quick-start
 - 发布：Playwright/social-auto-upload 接入占位
 
 ## 配置密钥
@@ -31,21 +32,12 @@ DOUBAO_TTS_ACCESS_KEY=your_access_key
 
 ```bash
 ENABLE_REAL_VIDEO=true
-VIDEO_PROVIDER=volc_cv
-# IAM 访问密钥（控制台 → 头像 → API访问密钥），不是视觉产品 API Key
-VOLC_ACCESS_KEY=AKLTxxxxxxxx
-VOLC_SECRET_KEY=your_secret_access_key
-VOLC_CV_MODE=normal
-# 推荐：穿透后的本服务地址。留空则本地开发会把人像/音频临时上传到公网图床（PUBLIC_FILE_HOST=auto）
-PUBLIC_BASE_URL=
-PUBLIC_FILE_HOST=auto
+VIDEO_PROVIDER=heygen
+HEYGEN_API_KEY=sk_V2_xxxxxxxxxxxx
+HEYGEN_ASPECT_RATIO=auto
 ```
 
-火山接口需要能拉取人像与音频的 **公网 URL**。本地有两种方式：
-
-1. 配置 `PUBLIC_BASE_URL`（Cloudflare Tunnel / cpolar 等）指向本机 `8000`，使 `/output/...` 可外网访问
-2. 留空 `PUBLIC_BASE_URL`，保持 `PUBLIC_FILE_HOST=auto`（默认），生成前自动上传临时公网链接（文件会离开本机，注意隐私）
-
+HeyGen 流程：本地人像/音频先上传到 `POST /v3/assets`，再 `POST /v3/videos`（`type=image` + `audio_asset_id`）做口型驱动，轮询 `GET /v3/videos/{video_id}`。人像建议 JPG/PNG，音频建议 MP3/WAV。
 ## 后端启动
 
 ```bash
@@ -88,4 +80,4 @@ Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`。
 
 声音克隆目前按火山官方异步长文本 TTS 文档接入，使用的是已经复刻好的 `Speaker ID`。控制台里的“上传参考音频生成”属于体验中心能力，未在当前代码中硬编码控制台内部接口。
 
-视频生成模块默认使用火山视觉「单图音频驱动」：先 `CVSubmitTask` 创建形象拿到 `resource_id`，再提交音频驱动任务并轮询 `CVGetResult`。未开启真实视频时生成 `output/video/*.json` 占位。
+视频生成模块默认使用 HeyGen Image-to-Video：本地人像/音频上传 Assets 后，以 `type=image` + `audio_asset_id` 创建视频并轮询结果。未开启真实视频时生成 `output/video/*.json` 占位。

@@ -41,6 +41,27 @@ class VideoGenerationResult:
     source_video_url: str | None = None
 
 
+@dataclass
+class VideoStatusSnapshot:
+    """HeyGen GET /v3/videos/{id} status mapped for UI polling.
+
+    Official docs only expose status enum (no percent):
+    https://developers.heygen.com/reference/get-video
+    pending | processing | completed | failed
+    """
+
+    task_id: str
+    status: str
+    message: str
+    progress_percent: int
+    video_url: str | None = None
+    local_video_path: str | None = None
+    source_video_url: str | None = None
+    video_page_url: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
+
+
 def _estimate_duration_seconds(script: str) -> int:
     length = len(script.strip()) or 240
     return min(90, max(15, round(length / 4.2)))
@@ -133,12 +154,11 @@ def _create_placeholder(
     payload = {
         "status": "placeholder",
         "message": (
-            "真实视频生成未开启。配置 ENABLE_REAL_VIDEO=true、"
-            "VOLC_ACCESS_KEY / VOLC_SECRET_KEY（及 PUBLIC_BASE_URL 或临时图床）"
-            "后将调用火山「单图音频驱动」。"
+            "真实视频生成未开启。配置 ENABLE_REAL_VIDEO=true、HEYGEN_API_KEY "
+            "后将调用 HeyGen 图片+音频口型驱动（VIDEO_PROVIDER=heygen）。"
         ),
         "provider": settings.video_provider,
-        "docs": "https://docs.volcengine.com/docs/86081/1804513",
+        "docs": "https://developers.heygen.com/image-to-video",
         "portrait_asset_id": portrait_asset_id,
         "audio_path": str(Path(audio_path).resolve()) if not _is_http_url(audio_path) else audio_path,
         "audio_source_url": audio_source_url,
@@ -515,6 +535,391 @@ def _generate_with_volc_cv(
     )
 
 
+def _heygen_headers() -> dict[str, str]:
+    settings = get_settings()
+    key = (settings.heygen_api_key or "").strip()
+    if not key:
+        raise RuntimeError(
+            "缺少 HEYGEN_API_KEY。请到 HeyGen Settings → API 创建密钥："
+            "https://app.heygen.com/settings"
+        )
+    return {"X-Api-Key": key, "Accept": "application/json"}
+
+
+def _heygen_raise(response: requests.Response, action: str) -> None:
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        payload = {"raw": response.text[:500]}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        code = error.get("code") or response.status_code
+        message = error.get("message") or error
+        raise RuntimeError(f"HeyGen {action} 失败（{code}）：{message}")
+    if isinstance(payload, dict) and payload.get("message") and response.status_code >= 400:
+        raise RuntimeError(f"HeyGen {action} 失败：{payload.get('message')}")
+    response.raise_for_status()
+    raise RuntimeError(f"HeyGen {action} 失败 HTTP {response.status_code}：{payload}")
+
+
+def _heygen_guess_mime(path: Path) -> str:
+    ext = path.suffix.lower()
+    mapping = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+    }
+    mime = mapping.get(ext)
+    if not mime:
+        raise RuntimeError(
+            f"HeyGen 暂不支持该文件类型：{ext or path.name}。"
+            "人像请用 JPG/PNG，音频请用 MP3/WAV。"
+        )
+    return mime
+
+
+def _heygen_upload_asset(path: Path, *, kind: str) -> str:
+    """Upload local file to HeyGen Assets API; returns asset_id."""
+    settings = get_settings()
+    mime = _heygen_guess_mime(path)
+    url = f"{settings.heygen_api_base}{settings.heygen_assets_path}"
+    size = path.stat().st_size
+    if size > 32 * 1024 * 1024:
+        raise RuntimeError(f"{kind} 超过 HeyGen 普通上传 32MB 限制：{path}")
+
+    logger.info("Uploading %s to HeyGen assets path=%s size=%s", kind, path.name, size)
+    with path.open("rb") as handle:
+        response = requests.post(
+            url,
+            headers=_heygen_headers(),
+            files={"file": (path.name, handle, mime)},
+            timeout=180,
+        )
+    if response.status_code >= 400:
+        _heygen_raise(response, f"上传{kind}")
+    data = (response.json() or {}).get("data") or {}
+    asset_id = data.get("asset_id") or data.get("id")
+    if not asset_id:
+        raise RuntimeError(f"HeyGen 上传{kind}未返回 asset_id：{response.text[:400]}")
+    return str(asset_id)
+
+
+def _resolve_local_media_path(value: str) -> Path | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    mapped = _local_path_from_output_url(text)
+    if mapped is not None:
+        return mapped
+    path = Path(text)
+    return path if path.is_file() else None
+
+
+def _heygen_status_meta(status: str) -> tuple[int, str]:
+    """Map HeyGen status enum → approximate UI percent + Chinese label."""
+    key = (status or "").strip().lower()
+    mapping = {
+        "pending": (25, "排队中（pending）"),
+        "processing": (65, "生成中（processing）"),
+        "completed": (100, "已完成（completed）"),
+        "failed": (100, "生成失败（failed）"),
+        "downloading": (90, "下载成品中"),
+        "submitted": (15, "已提交，等待排队"),
+    }
+    return mapping.get(key, (40, f"状态：{status or 'unknown'}"))
+
+
+def _fetch_heygen_video_once(video_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    query_path = settings.heygen_query_path.replace("{video_id}", video_id)
+    url = f"{settings.heygen_api_base}{query_path}"
+    response = requests.get(url, headers=_heygen_headers(), timeout=60)
+    if response.status_code >= 400:
+        _heygen_raise(response, "查询视频")
+    payload = response.json() or {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        raise RuntimeError(f"HeyGen 查询返回异常：{payload}")
+    return data
+
+
+def _poll_heygen_video(video_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    deadline = time.monotonic() + settings.heygen_timeout_seconds
+    last: dict[str, Any] = {}
+
+    while time.monotonic() < deadline:
+        data = _fetch_heygen_video_once(video_id)
+        last = data
+        status = str(data.get("status") or "").lower()
+        logger.info("HeyGen video_id=%s status=%s", video_id, status)
+        if status == "completed":
+            return data
+        if status == "failed":
+            raise RuntimeError(
+                "HeyGen 视频生成失败："
+                f"{data.get('failure_code') or ''} {data.get('failure_message') or data}"
+            )
+        time.sleep(settings.heygen_poll_interval_seconds)
+
+    raise TimeoutError(f"HeyGen 视频超时：video_id={video_id} last={last}")
+
+
+def _build_heygen_create_body(
+    portrait_asset_id: str,
+    audio_path: str,
+    script: str,
+    resolution: str,
+    audio_source_url: str | None,
+    *,
+    title: str | None = None,
+    aspect_ratio: str | None = None,
+    fit: str | None = None,
+    remove_background: bool = False,
+    output_format: str = "mp4",
+    expressiveness: str | None = None,
+    motion_prompt: str | None = None,
+    background_type: str = "none",
+    background_color: str | None = None,
+    burn_captions: bool = False,
+) -> dict[str, Any]:
+    settings = get_settings()
+    res = (resolution or "720p").strip().lower()
+    if res not in {"720p", "1080p", "4k"}:
+        res = "720p"
+
+    portrait_raw = (portrait_asset_id or "").strip()
+    local_image = _resolve_local_media_path(portrait_raw)
+
+    audio_remote = (audio_source_url or "").strip()
+    audio_local = (audio_path or "").strip()
+    if audio_remote.startswith("/") and not _is_http_url(audio_remote):
+        audio_candidate = audio_local or audio_remote
+    elif audio_remote:
+        audio_candidate = audio_remote
+    else:
+        audio_candidate = audio_local
+    local_audio = _resolve_local_media_path(audio_candidate)
+
+    ratio = (aspect_ratio or settings.heygen_aspect_ratio or "auto").strip()
+    if ratio not in {"auto", "16:9", "9:16", "4:5", "5:4", "1:1"}:
+        ratio = "auto"
+
+    fmt = (output_format or "mp4").strip().lower()
+    if fmt not in {"mp4", "webm"}:
+        fmt = "mp4"
+
+    body: dict[str, Any] = {
+        "type": "image",
+        "title": ((title or script or "数字人口播").strip() or "数字人口播")[:80],
+        "resolution": res,
+        "aspect_ratio": ratio,
+        "output_format": fmt,
+    }
+
+    fit_value = (fit or "").strip().lower()
+    if fit_value in {"contain", "cover"}:
+        body["fit"] = fit_value
+
+    # webm implies transparent bg; don't send color background together
+    if fmt == "webm":
+        body["remove_background"] = True
+    else:
+        if remove_background:
+            body["remove_background"] = True
+        bg_type = (background_type or "none").strip().lower()
+        if bg_type == "color":
+            color = (background_color or "#FFFFFF").strip()
+            if not color.startswith("#"):
+                color = f"#{color}"
+            body["background"] = {"type": "color", "value": color}
+
+    expr = (expressiveness or "").strip().lower()
+    if expr in {"low", "medium", "high"}:
+        body["expressiveness"] = expr
+
+    motion = (motion_prompt or "").strip()
+    if motion:
+        body["motion_prompt"] = motion[:500]
+
+    if burn_captions:
+        body["caption"] = {"file_format": "srt", "style": "default"}
+
+    if local_image is not None:
+        image_asset_id = _heygen_upload_asset(local_image, kind="人像图片")
+        body["image"] = {"type": "asset_id", "asset_id": image_asset_id}
+    elif _is_http_url(portrait_raw):
+        if "127.0.0.1" in portrait_raw or "localhost" in portrait_raw:
+            raise RuntimeError(
+                "人像使用了本地地址，HeyGen 无法访问。请上传本地文件，或提供公网 HTTPS URL。"
+            )
+        body["image"] = {"type": "url", "url": portrait_raw}
+    else:
+        raise RuntimeError(f"人像图片不存在：{portrait_raw}")
+
+    if local_audio is not None:
+        body["audio_asset_id"] = _heygen_upload_asset(local_audio, kind="音频")
+    elif _is_http_url(audio_candidate):
+        if "127.0.0.1" in audio_candidate or "localhost" in audio_candidate:
+            raise RuntimeError(
+                "音频使用了本地地址，HeyGen 无法访问。请使用本地文件路径或公网 HTTPS URL。"
+            )
+        body["audio_url"] = audio_candidate
+    else:
+        raise RuntimeError(f"音频文件不存在：{audio_candidate}")
+    return body
+
+
+def start_heygen_video(
+    portrait_asset_id: str,
+    audio_path: str,
+    script: str,
+    resolution: str = "720p",
+    audio_source_url: str | None = None,
+    **heygen_options: Any,
+) -> VideoStatusSnapshot:
+    """Upload assets + POST /v3/videos, return video_id for frontend polling."""
+    settings = get_settings()
+    body = _build_heygen_create_body(
+        portrait_asset_id,
+        audio_path,
+        script,
+        resolution,
+        audio_source_url,
+        title=heygen_options.get("title"),
+        aspect_ratio=heygen_options.get("aspect_ratio"),
+        fit=heygen_options.get("fit"),
+        remove_background=bool(heygen_options.get("remove_background")),
+        output_format=str(heygen_options.get("output_format") or "mp4"),
+        expressiveness=heygen_options.get("expressiveness"),
+        motion_prompt=heygen_options.get("motion_prompt"),
+        background_type=str(heygen_options.get("background_type") or "none"),
+        background_color=heygen_options.get("background_color"),
+        burn_captions=bool(heygen_options.get("burn_captions")),
+    )
+    create_url = f"{settings.heygen_api_base}{settings.heygen_create_path}"
+    logger.info(
+        "Submitting HeyGen image+audio video resolution=%s aspect=%s fit=%s format=%s",
+        body.get("resolution"),
+        body.get("aspect_ratio"),
+        body.get("fit"),
+        body.get("output_format"),
+    )
+    create_resp = requests.post(
+        create_url,
+        headers={**_heygen_headers(), "Content-Type": "application/json"},
+        json=body,
+        timeout=120,
+    )
+    if create_resp.status_code >= 400:
+        _heygen_raise(create_resp, "创建视频")
+    create_data = (create_resp.json() or {}).get("data") or {}
+    video_id = create_data.get("video_id") or create_data.get("id")
+    if not video_id:
+        raise RuntimeError(f"HeyGen 创建视频未返回 video_id：{create_resp.text[:500]}")
+
+    status = str(create_data.get("status") or "pending").lower()
+    percent, message = _heygen_status_meta(status if status in {"pending", "processing"} else "submitted")
+    return VideoStatusSnapshot(
+        task_id=str(video_id),
+        status=status if status in {"pending", "processing", "completed", "failed"} else "pending",
+        message=message,
+        progress_percent=percent,
+        video_page_url=create_data.get("video_page_url"),
+    )
+
+
+def query_heygen_video_status(video_id: str, *, download: bool = True) -> VideoStatusSnapshot:
+    """One-shot status from GET /v3/videos/{video_id}; download when completed."""
+    settings = get_settings()
+    data = _fetch_heygen_video_once(video_id)
+    status = str(data.get("status") or "").lower()
+    percent, message = _heygen_status_meta(status)
+    snapshot = VideoStatusSnapshot(
+        task_id=str(video_id),
+        status=status or "pending",
+        message=message,
+        progress_percent=percent,
+        video_page_url=data.get("video_page_url"),
+        failure_code=str(data.get("failure_code") or "") or None,
+        failure_message=str(data.get("failure_message") or "") or None,
+    )
+
+    if status == "failed":
+        detail = snapshot.failure_message or snapshot.failure_code or "unknown"
+        snapshot.message = f"生成失败：{detail}"
+        return snapshot
+
+    if status != "completed":
+        return snapshot
+
+    source_url = data.get("video_url") or data.get("video_url_caption")
+    if not source_url or not _is_http_url(str(source_url)):
+        raise RuntimeError(f"HeyGen 完成但未返回 video_url：{data}")
+
+    snapshot.source_video_url = str(source_url)
+    if not download:
+        snapshot.video_url = str(source_url)
+        return snapshot
+
+    snapshot.status = "downloading"
+    snapshot.progress_percent = 90
+    snapshot.message = "下载成品中"
+    try:
+        local_path = _download_video(str(source_url), str(video_id))
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to download HeyGen video video_id=%s", video_id)
+        local_path = None
+
+    snapshot.status = "completed"
+    snapshot.progress_percent = 100
+    snapshot.message = "已完成"
+    snapshot.local_video_path = local_path
+    snapshot.video_url = (
+        output_url(local_path, settings.output_dir) if local_path else str(source_url)
+    )
+    return snapshot
+
+
+def _generate_with_heygen(
+    portrait_asset_id: str,
+    audio_path: str,
+    script: str,
+    resolution: str,
+    audio_source_url: str | None,
+    **heygen_options: Any,
+) -> VideoGenerationResult:
+    """HeyGen Image-to-Video with audio lipsync (blocking helper for workflows)."""
+    started = start_heygen_video(
+        portrait_asset_id,
+        audio_path,
+        script,
+        resolution,
+        audio_source_url,
+        **heygen_options,
+    )
+    done = _poll_heygen_video(started.task_id)
+    source_url = done.get("video_url") or done.get("video_url_caption")
+    if not source_url or not _is_http_url(str(source_url)):
+        raise RuntimeError(f"HeyGen 完成但未返回 video_url：{done}")
+
+    try:
+        local_path = _download_video(str(source_url), started.task_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to download HeyGen video video_id=%s", started.task_id)
+        local_path = None
+
+    settings = get_settings()
+    return VideoGenerationResult(
+        video_url=output_url(local_path, settings.output_dir) if local_path else str(source_url),
+        local_video_path=local_path,
+        task_id=started.task_id,
+        source_video_url=str(source_url),
+    )
+
+
 def generate_digital_human(
     portrait_asset_id: str,
     audio_path: str,
@@ -522,9 +927,10 @@ def generate_digital_human(
     resolution: str = "720p",
     audio_source_url: Optional[str] = None,
     volc_cv_mode: Optional[str] = None,
+    **heygen_options: Any,
 ) -> VideoGenerationResult:
     """
-    portrait_asset_id: 人像图片公网 URL / 本地图片路径（需配合 PUBLIC_BASE_URL）
+    portrait_asset_id: 人像图片公网 URL / 本地图片路径
     audio_path: 本地音频路径或远程音频 URL
     script: 文案（元数据；口型由音频驱动）
     """
@@ -538,7 +944,16 @@ def generate_digital_human(
             audio_source_url,
         )
 
-    provider = (settings.video_provider or "volc_cv").strip().lower()
+    provider = (settings.video_provider or "heygen").strip().lower()
+    if provider in {"heygen", "hey_gen"}:
+        return _generate_with_heygen(
+            portrait_asset_id,
+            audio_path,
+            script,
+            resolution,
+            audio_source_url,
+            **heygen_options,
+        )
     if provider in {"volc_cv", "volc", "cv", "realman"}:
         return _generate_with_volc_cv(
             portrait_asset_id,
@@ -550,5 +965,6 @@ def generate_digital_human(
         )
     raise RuntimeError(
         f"不支持的 VIDEO_PROVIDER：{settings.video_provider}。"
-        "请使用 volc_cv（火山单图音频驱动，文档 https://docs.volcengine.com/docs/86081/1804513 ）。"
+        "请使用 heygen（图片+音频口型，https://developers.heygen.com/image-to-video ）"
+        "或 volc_cv（火山单图音频驱动）。"
     )

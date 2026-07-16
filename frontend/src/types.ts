@@ -24,7 +24,16 @@ export interface WorkflowPayload {
   speedRatio: number;
   volumeRatio: number;
   pitchRatio: number;
-  resolution: '720p' | '1080p';
+  resolution: '720p' | '1080p' | '4k';
+  aspectRatio: 'auto' | '16:9' | '9:16' | '4:5' | '5:4' | '1:1';
+  fit: '' | 'contain' | 'cover';
+  removeBackground: boolean;
+  outputFormat: 'mp4' | 'webm';
+  expressiveness: 'low' | 'medium' | 'high';
+  motionPrompt: string;
+  backgroundType: 'none' | 'color';
+  backgroundColor: string;
+  burnCaptions: boolean;
   volcCvMode: 'normal' | 'loopy' | 'loopyb';
   publishNow: boolean;
   platforms: Platform[];
@@ -68,6 +77,20 @@ export interface AudioHistoryItem {
   sizeBytes: number;
 }
 
+export interface VideoHistoryItem {
+  id: string;
+  fileName: string;
+  localVideoPath: string;
+  videoUrl?: string;
+  sourceVideoUrl?: string;
+  taskId?: string;
+  textPreview?: string;
+  title?: string;
+  resolution?: string;
+  createdAt: string;
+  sizeBytes: number;
+}
+
 export interface PortraitUploadResult {
   portraitPath: string;
   portraitUrl: string;
@@ -79,7 +102,17 @@ export interface VideoGeneratePayload {
   audioPath: string;
   audioUrl?: string;
   script: string;
-  resolution: '720p' | '1080p';
+  title?: string;
+  resolution: '720p' | '1080p' | '4k';
+  aspectRatio?: 'auto' | '16:9' | '9:16' | '4:5' | '5:4' | '1:1';
+  fit?: '' | 'contain' | 'cover';
+  removeBackground?: boolean;
+  outputFormat?: 'mp4' | 'webm';
+  expressiveness?: 'low' | 'medium' | 'high';
+  motionPrompt?: string;
+  backgroundType?: 'none' | 'color';
+  backgroundColor?: string;
+  burnCaptions?: boolean;
   volcCvMode?: 'normal' | 'loopy' | 'loopyb';
 }
 
@@ -88,6 +121,23 @@ export interface VideoGenerateResult {
   localVideoPath?: string;
   taskId?: string;
   sourceVideoUrl?: string;
+  status?: string;
+  message?: string;
+  progressPercent?: number;
+  videoPageUrl?: string;
+}
+
+export interface VideoStatusResult {
+  taskId: string;
+  status: string;
+  message: string;
+  progressPercent: number;
+  videoUrl?: string;
+  localVideoPath?: string;
+  sourceVideoUrl?: string;
+  videoPageUrl?: string;
+  failureCode?: string;
+  failureMessage?: string;
 }
 
 export interface PublishResult {

@@ -101,9 +101,23 @@ class Settings(BaseModel):
         "https://ark.cn-beijing.volces.com/api/v3/files",
     )
     enable_real_video: bool = _env_bool("ENABLE_REAL_VIDEO")
-    video_provider: str = os.getenv("VIDEO_PROVIDER", "volc_cv").strip().lower()
+    video_provider: str = os.getenv("VIDEO_PROVIDER", "heygen").strip().lower()
 
-    # Volcengine Visual「单图音频驱动」
+    # HeyGen Image-to-Video（音频驱动口型）
+    # https://developers.heygen.com/image-to-video
+    # https://developers.heygen.com/docs/quick-start
+    heygen_api_key: str = os.getenv("HEYGEN_API_KEY", "")
+    heygen_api_base: str = os.getenv("HEYGEN_API_BASE", "https://api.heygen.com").rstrip("/")
+    heygen_create_path: str = os.getenv("HEYGEN_CREATE_PATH", "/v3/videos")
+    heygen_query_path: str = os.getenv("HEYGEN_QUERY_PATH", "/v3/videos/{video_id}")
+    heygen_assets_path: str = os.getenv("HEYGEN_ASSETS_PATH", "/v3/assets")
+    heygen_aspect_ratio: str = os.getenv("HEYGEN_ASPECT_RATIO", "auto").strip() or "auto"
+    heygen_poll_interval_seconds: float = float(
+        os.getenv("HEYGEN_POLL_INTERVAL_SECONDS", "8")
+    )
+    heygen_timeout_seconds: int = int(os.getenv("HEYGEN_TIMEOUT_SECONDS", "900"))
+
+    # Volcengine Visual「单图音频驱动」（可选备选 VIDEO_PROVIDER=volc_cv）
     # https://docs.volcengine.com/docs/86081/1804513
     volc_access_key: str = os.getenv("VOLC_ACCESS_KEY", os.getenv("VOLC_ACCESSKEY", ""))
     volc_secret_key: str = os.getenv("VOLC_SECRET_KEY", os.getenv("VOLC_SECRETKEY", ""))

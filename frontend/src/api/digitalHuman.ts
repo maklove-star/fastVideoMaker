@@ -7,6 +7,8 @@ import type {
   ScriptProcessResult,
   VideoGeneratePayload,
   VideoGenerateResult,
+  VideoHistoryItem,
+  VideoStatusResult,
   VoiceOption,
   WorkflowPayload,
   WorkflowResult,
@@ -62,6 +64,11 @@ export async function listAudioHistory(limit = 50): Promise<AudioHistoryItem[]> 
   return data.items || [];
 }
 
+export async function listVideoHistory(limit = 50): Promise<VideoHistoryItem[]> {
+  const data = await requestJson<{ items: VideoHistoryItem[] }>('/api/video/history?limit=' + limit);
+  return data.items || [];
+}
+
 export async function previewAudio(payload: AudioGeneratePayload): Promise<AudioGenerateResult> {
   return requestJson<AudioGenerateResult>('/api/audio/preview', {
     method: 'POST',
@@ -99,8 +106,29 @@ export async function generateAudio(payload: AudioGeneratePayload): Promise<Audi
 export async function generateVideo(payload: VideoGeneratePayload): Promise<VideoGenerateResult> {
   return requestJson<VideoGenerateResult>('/api/video/generate', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      portraitAssetId: payload.portraitAssetId,
+      audioPath: payload.audioPath,
+      audioUrl: payload.audioUrl,
+      script: payload.script,
+      title: payload.title || undefined,
+      resolution: payload.resolution,
+      aspectRatio: payload.aspectRatio || 'auto',
+      fit: payload.fit || null,
+      removeBackground: Boolean(payload.removeBackground),
+      outputFormat: payload.outputFormat || 'mp4',
+      expressiveness: payload.expressiveness || 'low',
+      motionPrompt: payload.motionPrompt || undefined,
+      backgroundType: payload.backgroundType || 'none',
+      backgroundColor: payload.backgroundColor || undefined,
+      burnCaptions: Boolean(payload.burnCaptions),
+      volcCvMode: payload.volcCvMode,
+    }),
   });
+}
+
+export async function queryVideoStatus(taskId: string): Promise<VideoStatusResult> {
+  return requestJson<VideoStatusResult>(`/api/video/status/${encodeURIComponent(taskId)}`);
 }
 
 export async function uploadPortrait(file: File): Promise<PortraitUploadResult> {

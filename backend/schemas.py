@@ -31,7 +31,16 @@ class WorkflowPayload(BaseModel):
     speedRatio: float = Field(default=1.0, ge=0.1, le=2.0)
     volumeRatio: float = Field(default=1.0, ge=0.1, le=3.0)
     pitchRatio: float = Field(default=1.0, ge=0.1, le=3.0)
-    resolution: Literal["720p", "1080p"] = "720p"
+    resolution: Literal["720p", "1080p", "4k"] = "720p"
+    aspectRatio: Literal["auto", "16:9", "9:16", "4:5", "5:4", "1:1"] = "auto"
+    fit: Optional[Literal["contain", "cover"]] = None
+    removeBackground: bool = False
+    outputFormat: Literal["mp4", "webm"] = "mp4"
+    expressiveness: Literal["low", "medium", "high"] = "low"
+    motionPrompt: Optional[str] = None
+    backgroundType: Literal["none", "color"] = "none"
+    backgroundColor: Optional[str] = "#FFFFFF"
+    burnCaptions: bool = False
     publishNow: bool = True
     platforms: List[Platform] = Field(default_factory=lambda: ["douyin", "xiaohongshu"])
 
@@ -87,12 +96,42 @@ class AudioHistoryResponse(BaseModel):
     items: List[AudioHistoryItem] = Field(default_factory=list)
 
 
+class VideoHistoryItem(BaseModel):
+    id: str
+    fileName: str
+    localVideoPath: str
+    videoUrl: Optional[str] = None
+    sourceVideoUrl: Optional[str] = None
+    taskId: Optional[str] = None
+    textPreview: Optional[str] = None
+    title: Optional[str] = None
+    resolution: Optional[str] = None
+    createdAt: str
+    sizeBytes: int
+
+
+class VideoHistoryResponse(BaseModel):
+    items: List[VideoHistoryItem] = Field(default_factory=list)
+
+
 class VideoGenerateRequest(BaseModel):
     portraitAssetId: str = Field(..., min_length=1)
     audioPath: str = Field(..., min_length=1)
     audioUrl: Optional[str] = None
     script: str = Field(..., min_length=1)
-    resolution: Literal["720p", "1080p"] = "720p"
+    # HeyGen Image-to-Video options
+    # https://developers.heygen.com/reference/create-video
+    title: Optional[str] = None
+    resolution: Literal["720p", "1080p", "4k"] = "720p"
+    aspectRatio: Literal["auto", "16:9", "9:16", "4:5", "5:4", "1:1"] = "auto"
+    fit: Optional[Literal["contain", "cover"]] = None
+    removeBackground: bool = False
+    outputFormat: Literal["mp4", "webm"] = "mp4"
+    expressiveness: Literal["low", "medium", "high"] = "low"
+    motionPrompt: Optional[str] = None
+    backgroundType: Literal["none", "color"] = "none"
+    backgroundColor: Optional[str] = None
+    burnCaptions: bool = False
     volcCvMode: Optional[Literal["normal", "loopy", "loopyb"]] = None
 
 
@@ -101,6 +140,23 @@ class VideoGenerateResponse(BaseModel):
     localVideoPath: Optional[str] = None
     taskId: Optional[str] = None
     sourceVideoUrl: Optional[str] = None
+    status: Optional[str] = None
+    message: Optional[str] = None
+    progressPercent: Optional[int] = None
+    videoPageUrl: Optional[str] = None
+
+
+class VideoStatusResponse(BaseModel):
+    taskId: str
+    status: str
+    message: str
+    progressPercent: int
+    videoUrl: Optional[str] = None
+    localVideoPath: Optional[str] = None
+    sourceVideoUrl: Optional[str] = None
+    videoPageUrl: Optional[str] = None
+    failureCode: Optional[str] = None
+    failureMessage: Optional[str] = None
 
 
 class PublishResult(BaseModel):
